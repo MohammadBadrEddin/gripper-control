@@ -1,0 +1,43 @@
+# ===== STM32CubeIDE =====
+Debug/
+Release/
+*-Debug/
+*-Release/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.su
+.metadata/
+.settings/
+RTE/
+*.launch
+*.cyclo
+
+*.ioc.bak
+*.autosave
+EWARM/
+MDK-ARM/
+
+# ===== OS / editor cruft =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+*.csv
+!docs/**/*.csv
+*.log
+
+# *.ioc
+# Core/
+# Drivers/            <- keep if you vendor HAL/CMSIS instead of regenerating per member
+# Middlewares/
+# .project
+# .cproject
+# STM32*.ld / linker scripts
