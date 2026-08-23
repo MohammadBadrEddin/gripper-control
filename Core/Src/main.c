@@ -27,7 +27,9 @@
 #include "event_groups.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "tmc2209_driver.h"
+#include "as5600_driver.h"
+#include "as5600_estimator.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,7 +55,10 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+TMC2209_Handle tmc;
 
+AS5600_Handle_t    g_enc;
+AS5600_Estimator_t g_est;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -71,7 +76,11 @@ void tmc_task(void * pvParameters);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+static void tmc_set_enable(bool en)   /* TMC_EN is active low */
+{
+    HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin,
+                      en ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
 /* USER CODE END 0 */
 
 /**
@@ -107,7 +116,7 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  tmc_set_enable(false);
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -415,7 +424,20 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *h)
+{ if (h->Instance == USART2) TMC2209_UART_TxCpltCallback(&tmc); }
 
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *h, uint16_t size)
+{ if (h->Instance == USART2) TMC2209_UART_RxEventCallback(&tmc, size); }
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *h)
+{ if (h->Instance == USART2) TMC2209_UART_ErrorCallback(&tmc); }
+
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{ if (hi2c->Instance == I2C1) AS5600_I2C_RxCpltCallback(&g_enc, hi2c); }
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{ if (hi2c->Instance == I2C1) AS5600_I2C_ErrorCallback(&g_enc, hi2c); }
 /* USER CODE END 4 */
 
 /**

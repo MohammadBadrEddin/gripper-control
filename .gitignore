@@ -1,0 +1,7 @@
+*.o
+*.d
+*.su
+*.cyclo
+Debug/*.elf
+Debug/*.list
+Debug/*.map
