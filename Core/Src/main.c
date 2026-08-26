@@ -25,6 +25,9 @@
 #include "queue.h"
 #include "semphr.h"
 #include "event_groups.h"
+
+#include "tmc2209.h"
+//#include "usart.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -65,8 +68,10 @@ static void MX_USART2_UART_Init(void);
 
 
 void tmc_task(void * pvParameters);
+void StartStepperTestTask(void *argument);
 /* USER CODE BEGIN PFP */
 
+#define STEPS_PER_REV 200
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -129,6 +134,7 @@ int main(void)
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
   xTaskCreate(tmc_task, "tmcTask", 512, NULL, 2, NULL );
+  xTaskCreate(StartStepperTestTask, "StepperTest", 256, NULL, tskIDLE_PRIORITY + 3, NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -159,6 +165,24 @@ void tmc_task(void * pvParameters)
 
 
 	 }
+}
+// Create with, e.g.:
+
+void StartStepperTestTask(void *argument)
+{
+    static TMC2209_HandleTypeDef tmc;
+
+    if (TMC2209_Init(&tmc, &huart2, GPIOE, GPIO_PIN_9, GPIOE, GPIO_PIN_11, GPIOE, GPIO_PIN_13) != TMC2209_OK) {
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000)); // UART config failed, halt here
+    }
+
+    TMC2209_Enable(&tmc);
+    TMC2209_SetDirection(&tmc, TMC2209_DIR_CW);
+
+    for (;;) {
+        TMC2209_MoveSteps(&tmc, STEPS_PER_REV, 5); // one full 360 deg turn
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 /**
