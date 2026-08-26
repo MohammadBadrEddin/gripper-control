@@ -67,8 +67,9 @@ static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 
 
-void tmc_task(void * pvParameters);
+//void tmc_task(void * pvParameters);
 void StartStepperTestTask(void *argument);
+void HeartBeatTask(void *argument);
 /* USER CODE BEGIN PFP */
 
 #define STEPS_PER_REV 200
@@ -133,9 +134,9 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  xTaskCreate(tmc_task, "tmcTask", 512, NULL, 2, NULL );
-  xTaskCreate(StartStepperTestTask, "StepperTest", 256, NULL, tskIDLE_PRIORITY + 3, NULL);
-
+//  xTaskCreate(tmc_task, "tmcTask", 512, NULL, 2, NULL );
+  xTaskCreate(StartStepperTestTask, "StepperTest", 256, NULL, 3, NULL);
+  xTaskCreate(HeartBeatTask, "vHB", 128, NULL, 1, NULL);
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -155,17 +156,17 @@ int main(void)
   /* USER CODE END 3 */
 }
 
-void tmc_task(void * pvParameters)
-{
-
-
-	for( ;; )
-	 {
-
-
-
-	 }
-}
+//void tmc_task(void * pvParameters)
+//{
+//
+//
+//	for( ;; )
+//	 {
+//
+//
+//
+//	 }
+//}
 // Create with, e.g.:
 
 void StartStepperTestTask(void *argument)
@@ -182,6 +183,14 @@ void StartStepperTestTask(void *argument)
     for (;;) {
         TMC2209_MoveSteps(&tmc, STEPS_PER_REV, 5); // one full 360 deg turn
         vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+void HeartBeatTask(void *argument)
+{
+    for (;;) {
+//        printf("alive\r\n");
+    	HAL_GPIO_TogglePin(GPIOB, LED_GREEN_Pin);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
@@ -402,12 +411,22 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, TMC_STEP_Pin|TMC_DIR_Pin|TMC_EN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LED_GREEN_Pin */
+  GPIO_InitStruct.Pin = LED_GREEN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_GREEN_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : TMC_STEP_Pin */
   GPIO_InitStruct.Pin = TMC_STEP_Pin;
@@ -441,6 +460,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
 
 /**
   * @brief  Period elapsed callback in non blocking mode
