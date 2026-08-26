@@ -38,34 +38,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := SuR_Motor
+BUILD_ARTIFACT_NAME := gripper-control
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-SuR_Motor.elf \
+gripper-control.elf \
 
 MAP_FILES += \
-SuR_Motor.map \
+gripper-control.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-SuR_Motor.list \
+gripper-control.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: SuR_Motor.elf secondary-outputs
+main-build: gripper-control.elf secondary-outputs
 
 # Tool invocations
-SuR_Motor.elf SuR_Motor.map: $(OBJS) $(USER_OBJS) C:\SuR_Project\SuR_Motor\STM32H753ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "SuR_Motor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\SuR_Project\SuR_Motor\STM32H753ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+gripper-control.elf gripper-control.map: $(OBJS) $(USER_OBJS) C:\Master_SoSe_26\Si_Re\Abschlussprojekt\gripper-control\STM32H753ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "gripper-control.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Master_SoSe_26\Si_Re\Abschlussprojekt\gripper-control\STM32H753ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="gripper-control.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -74,14 +74,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-SuR_Motor.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "SuR_Motor.list"
+gripper-control.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "gripper-control.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) SuR_Motor.elf SuR_Motor.list SuR_Motor.map default.size.stdout
+	-$(RM) default.size.stdout gripper-control.elf gripper-control.list gripper-control.map
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)
