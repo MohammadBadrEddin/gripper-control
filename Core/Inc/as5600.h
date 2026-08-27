@@ -1,31 +1,47 @@
+/**
+ * @file    as5600.h
+ * @brief   Minimal AS5600 magnetic encoder driver (blocking I2C).
+ *
+ * Bare-minimum version: init, magnet check, read angle. No filtering, no
+ * multi-turn tracking, no interrupts, no RTOS dependency.
+ *
+ * Usage:
+ *     AS5600 enc;
+ *     AS5600_Init(&enc, &hi2c1);
+ *     if (AS5600_MagnetOK(&enc)) {
+ *         uint16_t raw = AS5600_ReadRaw(&enc);   // 0..4095
+ *         float deg    = AS5600_ReadDeg(&enc);   // 0..360
+ *     }
+ */
 #ifndef AS5600_H
 #define AS5600_H
 
 #include "stm32h7xx_hal.h"
 #include <stdint.h>
+#include <stdbool.h>
 
-#define AS5600_ADDR (0x36 << 1) // 7-bit addr, HAL wants it 8-bit left-shifted
+/* 7-bit address 0x36, shifted left for the HAL. */
+#define AS5600_ADDR      (0x36 << 1)
 
-// Register addresses (from AS5600 datasheet)
-#define AS5600_REG_STATUS    0x0B
-#define AS5600_REG_RAW_ANGLE 0x0C
-#define AS5600_REG_ANGLE     0x0E
-#define AS5600_REG_AGC       0x1A
-#define AS5600_REG_MAGNITUDE 0x1B
-
-#define AS5600_STATUS_MD_BIT (1U << 5) // magnet detected
-
-typedef enum {
-    AS5600_OK    = 0,
-    AS5600_ERROR = 1
-} AS5600_Status;
+/* Registers used here. */
+#define AS5600_RAW_ANGLE 0x0C   /* 12-bit, high byte first */
+#define AS5600_STATUS    0x0B
+#define AS5600_MD_BIT    (1 << 5)   /* magnet detected */
 
 typedef struct {
-    uint16_t raw_angle; // 0..4095
-    float    angle_deg; // 0..360
-} AS5600_Data;
+    I2C_HandleTypeDef *hi2c;
+} AS5600;
 
-AS5600_Status AS5600_Init(I2C_HandleTypeDef *hi2c);
-AS5600_Status AS5600_ReadData(I2C_HandleTypeDef *hi2c, AS5600_Data *data);
+/** Bind to an I2C bus. Returns true if the device responds. */
+bool AS5600_Init(AS5600 *enc, I2C_HandleTypeDef *hi2c);
 
-#endif // AS5600_H
+/** True if a magnet is detected. */
+bool AS5600_MagnetOK(AS5600 *enc);
+
+/** Raw angle 0..4095. Returns 0xFFFF on a read error. */
+uint16_t AS5600_ReadRaw(AS5600 *enc);
+
+/** Angle in degrees 0..360. Returns -1.0f on a read error. */
+float AS5600_ReadDeg(AS5600 *enc);
+
+#endif /* AS5600_H */

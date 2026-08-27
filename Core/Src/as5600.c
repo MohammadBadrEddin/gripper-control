@@ -1,32 +1,39 @@
 #include "as5600.h"
 
-static AS5600_Status ReadRegs(I2C_HandleTypeDef *hi2c, uint8_t reg, uint8_t *buf, uint16_t len)
+#define TIMEOUT 10  /* ms per I2C transaction */
+
+bool AS5600_Init(AS5600 *enc, I2C_HandleTypeDef *hi2c)
 {
-    if (HAL_I2C_Master_Transmit(hi2c, AS5600_ADDR, &reg, 1, HAL_MAX_DELAY) != HAL_OK)
-        return AS5600_ERROR;
-    if (HAL_I2C_Master_Receive(hi2c, AS5600_ADDR, buf, len, HAL_MAX_DELAY) != HAL_OK)
-        return AS5600_ERROR;
-    return AS5600_OK;
+    enc->hi2c = hi2c;
+    return (HAL_I2C_IsDeviceReady(hi2c, AS5600_ADDR, 2, TIMEOUT) == HAL_OK);
 }
 
-AS5600_Status AS5600_Init(I2C_HandleTypeDef *hi2c)
+bool AS5600_MagnetOK(AS5600 *enc)
 {
-    uint8_t status = 0;
-    if (ReadRegs(hi2c, AS5600_REG_STATUS, &status, 1) != AS5600_OK)
-        return AS5600_ERROR;
-    if (!(status & AS5600_STATUS_MD_BIT))
-        return AS5600_ERROR; // no magnet detected
-    return AS5600_OK;
+    uint8_t status;
+    if (HAL_I2C_Mem_Read(enc->hi2c, AS5600_ADDR, AS5600_STATUS,
+                         I2C_MEMADD_SIZE_8BIT, &status, 1, TIMEOUT) != HAL_OK) {
+        return false;
+    }
+    return (status & AS5600_MD_BIT) != 0;
 }
 
-AS5600_Status AS5600_ReadData(I2C_HandleTypeDef *hi2c, AS5600_Data *data)
+uint16_t AS5600_ReadRaw(AS5600 *enc)
 {
-    uint8_t raw[2];
-    if (ReadRegs(hi2c, AS5600_REG_RAW_ANGLE, raw, 2) != AS5600_OK)
-        return AS5600_ERROR;
+    uint8_t buf[2];
+    if (HAL_I2C_Mem_Read(enc->hi2c, AS5600_ADDR, AS5600_RAW_ANGLE,
+                         I2C_MEMADD_SIZE_8BIT, buf, 2, TIMEOUT) != HAL_OK) {
+        return 0xFFFF;   /* error */
+    }
+    /* high byte first, 12-bit value */
+    return (uint16_t)(((buf[0] << 8) | buf[1]) & 0x0FFF);
+}
 
-    /* RAW_ANGLE: high byte bits[3:0] then low byte bits[7:0] */
-    data->raw_angle = ((uint16_t)(raw[0] & 0x0F) << 8) | raw[1];
-    data->angle_deg = (data->raw_angle * 360.0f) / 4096.0f;
-    return AS5600_OK;
+float AS5600_ReadDeg(AS5600 *enc)
+{
+    uint16_t raw = AS5600_ReadRaw(enc);
+    if (raw == 0xFFFF) {
+        return -1.0f;
+    }
+    return raw * (360.0f / 4096.0f);
 }
