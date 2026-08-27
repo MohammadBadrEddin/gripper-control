@@ -25,8 +25,10 @@
 #include "queue.h"
 #include "semphr.h"
 #include "event_groups.h"
-
+/* USER CODE BEGIN Includes */
+#include "as5600.h"
 #include "tmc2209.h"
+/* USER CODE END Includes */
 //#include "usart.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -72,7 +74,6 @@ void StartStepperTestTask(void *argument);
 void HeartBeatTask(void *argument);
 /* USER CODE BEGIN PFP */
 
-#define STEPS_PER_REV 200
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -135,7 +136,7 @@ int main(void)
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
 //  xTaskCreate(tmc_task, "tmcTask", 512, NULL, 2, NULL );
-  xTaskCreate(StartStepperTestTask, "StepperTest", 256, NULL, 3, NULL);
+  xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
   xTaskCreate(HeartBeatTask, "vHB", 128, NULL, 1, NULL);
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -171,18 +172,32 @@ int main(void)
 
 void StartStepperTestTask(void *argument)
 {
-    static TMC2209_HandleTypeDef tmc;
+    static TMC2209 tmc;
 
-    if (TMC2209_Init(&tmc, &huart2, GPIOE, GPIO_PIN_9, GPIOE, GPIO_PIN_11, GPIOE, GPIO_PIN_13) != TMC2209_OK) {
-        for (;;) vTaskDelay(pdMS_TO_TICKS(1000)); // UART config failed, halt here
+    /* EN is active-low on the TMC2209: drive LOW to enable the outputs. */
+    HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* Node address 0 assumes MS1 + MS2 are both low. If this fails, try 1..3. */
+    if (!TMC2209_Init(&tmc, &huart2, 0)) {
+        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));   // no UART comms
     }
 
-    TMC2209_Enable(&tmc);
-    TMC2209_SetDirection(&tmc, TMC2209_DIR_CW);
+    TMC2209_SetCurrent(&tmc, 16, 8);     // run 16/32, hold 8/32 — start low
+    TMC2209_SetMicrosteps(&tmc, 16);
 
     for (;;) {
-        TMC2209_MoveSteps(&tmc, STEPS_PER_REV, 5); // one full 360 deg turn
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        TMC2209_MoveVelocity(&tmc, 10000);    // forward, ~7 kHz step rate
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        TMC2209_Stop(&tmc);
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        TMC2209_MoveVelocity(&tmc, -10000);   // reverse
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        TMC2209_Stop(&tmc);
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 void HeartBeatTask(void *argument)
