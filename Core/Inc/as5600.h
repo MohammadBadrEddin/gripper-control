@@ -16,7 +16,7 @@
 #ifndef AS5600_H
 #define AS5600_H
 
-#include "stm32h7xx_hal.h"
+#include "stm32f7xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
 

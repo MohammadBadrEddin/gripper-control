@@ -24,7 +24,7 @@
 #ifndef TMC2209_H
 #define TMC2209_H
 
-#include "stm32h7xx_hal.h"
+#include "stm32f7xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
 

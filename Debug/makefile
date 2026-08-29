@@ -10,10 +10,10 @@ RM := rm -rf
 # All of the sources participating in the build are defined here
 -include sources.mk
 -include Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/subdir.mk
--include Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/subdir.mk
+-include Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1/subdir.mk
 -include Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/subdir.mk
 -include Middlewares/Third_Party/FreeRTOS/Source/subdir.mk
--include Drivers/STM32H7xx_HAL_Driver/Src/subdir.mk
+-include Drivers/STM32F7xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
 -include objects.mk
@@ -38,34 +38,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := gripper-control
+BUILD_ARTIFACT_NAME := SuR_Motor_Remake
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-gripper-control.elf \
+SuR_Motor_Remake.elf \
 
 MAP_FILES += \
-gripper-control.map \
+SuR_Motor_Remake.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-gripper-control.list \
+SuR_Motor_Remake.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: gripper-control.elf secondary-outputs
+main-build: SuR_Motor_Remake.elf secondary-outputs
 
 # Tool invocations
-gripper-control.elf gripper-control.map: $(OBJS) $(USER_OBJS) C:\Master_SoSe_26\Si_Re\Abschlussprojekt\gripper-control\STM32H753ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "gripper-control.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Master_SoSe_26\Si_Re\Abschlussprojekt\gripper-control\STM32H753ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="gripper-control.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+SuR_Motor_Remake.elf SuR_Motor_Remake.map: $(OBJS) $(USER_OBJS) C:\Users\LOQ\STM32CubeIDE\workspace_1.19.0\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "SuR_Motor_Remake.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\LOQ\STM32CubeIDE\workspace_1.19.0\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor_Remake.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -74,14 +74,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-gripper-control.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "gripper-control.list"
+SuR_Motor_Remake.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "SuR_Motor_Remake.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) default.size.stdout gripper-control.elf gripper-control.list gripper-control.map
+	-$(RM) SuR_Motor_Remake.elf SuR_Motor_Remake.list SuR_Motor_Remake.map default.size.stdout
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)

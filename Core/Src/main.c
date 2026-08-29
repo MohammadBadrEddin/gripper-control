@@ -19,20 +19,14 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
-#include "FreeRTOS.h"
-#include "task.h"
-#include "timers.h"
-#include "queue.h"
-#include "semphr.h"
-#include "event_groups.h"
-/* USER CODE BEGIN Includes */
-#include "as5600.h"
-#include "tmc2209.h"
-/* USER CODE END Includes */
-//#include "usart.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "FreeRTOS.h"
+#include "task.h"
 
+#include "tmc2209.h"
+/* #include "as5600.h" */   /* enable once I2C1 is configured for the encoder */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,9 +46,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-I2C_HandleTypeDef hi2c1;
-
-UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -64,16 +55,11 @@ UART_HandleTypeDef huart2;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 
-
-//void tmc_task(void * pvParameters);
+/* USER CODE BEGIN PFP */
 void StartStepperTestTask(void *argument);
 void HeartBeatTask(void *argument);
-/* USER CODE BEGIN PFP */
-
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -110,10 +96,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
+  /* Keep the TMC2209 output stage DISABLED until the task has configured it.
+   * EN is active-low, so HIGH = outputs off. MX_GPIO_Init() drives it LOW,
+   * which would energise the motor at an unknown current before any software
+   * configuration runs -- undo that here, immediately after GPIO init. */
+  HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_SET);
 
   /* USER CODE END 2 */
 
@@ -135,15 +125,16 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-//  xTaskCreate(tmc_task, "tmcTask", 512, NULL, 2, NULL );
-  xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
-  xTaskCreate(HeartBeatTask, "vHB", 128, NULL, 1, NULL);
+
+
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
+  xTaskCreate(HeartBeatTask,        "vHB",         128, NULL, 1, NULL);
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
   vTaskStartScheduler();
+
   /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
@@ -151,62 +142,10 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-	  __WFI();
+    __WFI();
     /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
-}
-
-//void tmc_task(void * pvParameters)
-//{
-//
-//
-//	for( ;; )
-//	 {
-//
-//
-//
-//	 }
-//}
-// Create with, e.g.:
-
-void StartStepperTestTask(void *argument)
-{
-    static TMC2209 tmc;
-
-    /* EN is active-low on the TMC2209: drive LOW to enable the outputs. */
-    HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* Node address 0 assumes MS1 + MS2 are both low. If this fails, try 1..3. */
-    if (!TMC2209_Init(&tmc, &huart2, 0)) {
-        for (;;) vTaskDelay(pdMS_TO_TICKS(1000));   // no UART comms
-    }
-
-    TMC2209_SetCurrent(&tmc, 16, 8);     // run 16/32, hold 8/32 — start low
-    TMC2209_SetMicrosteps(&tmc, 16);
-
-    for (;;) {
-        TMC2209_MoveVelocity(&tmc, 10000);    // forward, ~7 kHz step rate
-        vTaskDelay(pdMS_TO_TICKS(2000));
-
-        TMC2209_Stop(&tmc);
-        vTaskDelay(pdMS_TO_TICKS(500));
-
-        TMC2209_MoveVelocity(&tmc, -10000);   // reverse
-        vTaskDelay(pdMS_TO_TICKS(2000));
-
-        TMC2209_Stop(&tmc);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-}
-void HeartBeatTask(void *argument)
-{
-    for (;;) {
-//        printf("alive\r\n");
-    	HAL_GPIO_TogglePin(GPIOB, LED_GREEN_Pin);
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
 }
 
 /**
@@ -218,15 +157,14 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Supply configuration update enable
+  /** Configure LSE Drive Capability
   */
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+  HAL_PWR_EnableBkUpAccess();
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
-
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -235,15 +173,19 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 1;
-  RCC_OscInitStruct.PLL.PLLN = 120;
-  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLM = 4;
+  RCC_OscInitStruct.PLL.PLLN = 216;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
-  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 0;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
@@ -251,116 +193,16 @@ void SystemClock_Config(void)
   /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7) != HAL_OK)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00B03FDB;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart1.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart1, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart1, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
 }
 
 /**
@@ -387,21 +229,8 @@ static void MX_USART2_UART_Init(void)
   huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart2.Init.OverSampling = UART_OVERSAMPLING_16;
   huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_HalfDuplex_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -426,9 +255,9 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
@@ -464,8 +293,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(TMC_DIAG_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(TMC_DIAG_EXTI_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(TMC_DIAG_EXTI_IRQn);
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -474,7 +303,61 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+/**
+  * @brief  Open-loop TMC2209 bring-up test over UART (VACTUAL velocity mode).
+  *
+  * No STEP pulses are generated: in VACTUAL mode the TMC2209 runs its own
+  * internal step generator, so this exercises the UART path in isolation.
+  *
+  * Expected behaviour: forward 2 s, pause 0.5 s, reverse 2 s, pause 0.5 s,
+  * repeating. At VACTUAL 10000 (~7150 Hz) with 16 microsteps on a 200-step
+  * motor that is roughly 2.2 rev/s.
+  */
+void StartStepperTestTask(void *argument)
+{
+    (void)argument;
+
+    HAL_GPIO_WritePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(TMC_EN_GPIO_Port,  TMC_EN_Pin,  GPIO_PIN_RESET); /* enable */
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    for (;;) {
+        /* 400 steps, ~1 ms per step (500 us high + 500 us low) */
+        for (int i = 0; i < 400; i++) {
+            HAL_GPIO_WritePin(TMC_STEP_GPIO_Port, TMC_STEP_Pin, GPIO_PIN_SET);
+            for (volatile int d = 0; d < 5000; d++) { __NOP(); }
+            HAL_GPIO_WritePin(TMC_STEP_GPIO_Port, TMC_STEP_Pin, GPIO_PIN_RESET);
+            for (volatile int d = 0; d < 5000; d++) { __NOP(); }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        /* reverse */
+        HAL_GPIO_TogglePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin);
+    }
+}
+
+/**
+  * @brief  1 Hz LED blink -- proves the scheduler is running.
+  */
+void HeartBeatTask(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
 
 
 /**
