@@ -4,7 +4,7 @@ FreeRTOS-based position and torque control firmware for a stepper-driven two-fin
 
 ## Hardware
 
-- MCU: STM32H753ZI (NUCLEO-H753ZI)
+- MCU: STM32F767ZI (NUCLEO-F767ZI)
 - Motor: NEMA17 stepper (17HE12-1204S)
 - Motor driver: TMC2209 
 - Position feedback: AS5600 magnetic encoder (I2C)
@@ -12,7 +12,7 @@ FreeRTOS-based position and torque control firmware for a stepper-driven two-fin
 ## Tools / firmware
 
 - STM32CubeIDE
-- STM32Cube FW_H7 firmware package **V1.12.1**
+- STM32Cube FW_F7 firmware package **V1.17.3**
 - FreeRTOS, CMSIS-RTOS **V1** interface
 
 ## Repo structure
