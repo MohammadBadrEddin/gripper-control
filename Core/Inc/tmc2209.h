@@ -27,6 +27,8 @@
 #include "stm32f7xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "FreeRTOS.h"	// included for use of mutex (02.09.2026)
+#include "semphr.h"		// included for use of mutex (02.09.2026)
 
 /* Registers used here (datasheet sec. 5) */
 #define TMC_GCONF       0x00
@@ -40,7 +42,8 @@
 
 typedef struct {
     UART_HandleTypeDef *huart;
-    uint8_t addr;        /* node address 0..3, set by the MS1/MS2 pins */
+    uint8_t addr;
+    SemaphoreHandle_t mutex;   // NEW: protects any UART-Transaction, included for use of mutex (02.09.2026)
 } TMC2209;
 
 /**

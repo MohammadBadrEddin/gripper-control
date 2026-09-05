@@ -3,6 +3,9 @@
 
 #define TMC_SYNC     0x05
 #define TMC_TIMEOUT  20     /* ms per UART transaction */
+#define TMC_MUTEX_TIMEOUT	pdMS_TO_TICKS(50)	// included for mutex (02.09.2026)
+
+//volatile uint32_t uart_success = 0;
 
 /* --------------------------------------------------------------------------
  * CRC8-ATM, polynomial 0x07, initial value 0, applied LSB->MSB.
@@ -40,8 +43,14 @@ void TMC2209_Write(TMC2209 *drv, uint8_t reg, uint32_t val)
     d[6] = (uint8_t)(val);
     d[7] = tmc_crc(d, 7);
 
+    if(xSemaphoreTake(drv->mutex, TMC_MUTEX_TIMEOUT) != pdTRUE) {		// included for mutex (02.09.2026)
+    	return;		// Bus currently in use, no writing
+    }
+
     HAL_HalfDuplex_EnableTransmitter(drv->huart);
     HAL_UART_Transmit(drv->huart, d, 8, TMC_TIMEOUT);
+
+    xSemaphoreGive(drv->mutex);											// included for mutex (02.09.2026)
 }
 
 /* --------------------------------------------------------------------------
@@ -58,33 +67,55 @@ bool TMC2209_Read(TMC2209 *drv, uint8_t reg, uint32_t *val)
     req[2] = reg & 0x7F;                /* bit 7 clear = read */
     req[3] = tmc_crc(req, 3);
 
+    if(xSemaphoreTake(drv->mutex, TMC_MUTEX_TIMEOUT) != pdTRUE) {		// included for mutex (02.09.2026)
+    	return false;	// Bus currently in use
+    }
+
+    bool ok = false;
+
     HAL_HalfDuplex_EnableTransmitter(drv->huart);
-    if (HAL_UART_Transmit(drv->huart, req, 4, TMC_TIMEOUT) != HAL_OK) {
-        return false;
+	if (HAL_UART_Transmit(drv->huart, req, 4, TMC_TIMEOUT) == HAL_OK) {
+
+		// Verzögerung
+		__HAL_UART_CLEAR_FLAG(drv->huart, UART_CLEAR_TCF);   // TC-Flag sauber löschen
+
+		HAL_HalfDuplex_EnableReceiver(drv->huart);
+
+		/* Discard our own echoed request bytes (single-wire artifact). */
+		uint8_t echo[4];
+		HAL_UART_Receive(drv->huart, echo, 4, TMC_TIMEOUT);
+
+		uint8_t rx[8];
+
+		/* commented for mutex (02.09.2026)
+		if (HAL_UART_Receive(drv->huart, rx, 8, TMC_TIMEOUT) != HAL_OK) {
+			return false;
+		}
+		// Validate: sync nibble, master address 0xFF, register, CRC.
+		if (rx[0] != TMC_SYNC || rx[1] != 0xFF || rx[2] != (reg & 0x7F)) {
+			return false;
+		}
+		if (tmc_crc(rx, 7) != rx[7]) {
+			return false;
+		}
+
+		*val = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16) |
+			   ((uint32_t)rx[5] << 8)  |  (uint32_t)rx[6];
+		return true;
+
+		*/
+
+		if (HAL_UART_Receive(drv->huart, rx, 8, TMC_TIMEOUT) == HAL_OK) {
+			if (rx[0] == TMC_SYNC && rx[1] == 0xFF && rx[2] == (reg & 0x7F)
+				&& tmc_crc(rx, 7) == rx[7]) {
+				*val = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16) |
+					   ((uint32_t)rx[5] << 8)  |  (uint32_t)rx[6];
+				ok = true;
+			}
+		}
     }
-
-    HAL_HalfDuplex_EnableReceiver(drv->huart);
-
-    /* Discard our own echoed request bytes (single-wire artifact). */
-    uint8_t echo[4];
-    HAL_UART_Receive(drv->huart, echo, 4, TMC_TIMEOUT);
-
-    uint8_t rx[8];
-    if (HAL_UART_Receive(drv->huart, rx, 8, TMC_TIMEOUT) != HAL_OK) {
-        return false;
-    }
-
-    /* Validate: sync nibble, master address 0xFF, register, CRC. */
-    if (rx[0] != TMC_SYNC || rx[1] != 0xFF || rx[2] != (reg & 0x7F)) {
-        return false;
-    }
-    if (tmc_crc(rx, 7) != rx[7]) {
-        return false;
-    }
-
-    *val = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16) |
-           ((uint32_t)rx[5] << 8)  |  (uint32_t)rx[6];
-    return true;
+    xSemaphoreGive(drv->mutex);
+    return ok;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -100,14 +131,22 @@ bool TMC2209_Init(TMC2209 *drv, UART_HandleTypeDef *huart, uint8_t addr)
     drv->huart = huart;
     drv->addr  = addr;
 
-    uint32_t before = 0;
-    bool have_ifcnt = TMC2209_Read(drv, TMC_IFCNT, &before);
+    // included for mutex (02.09.2026)
+    drv->mutex = xSemaphoreCreateMutex();
+    if(drv->mutex == NULL) {
+    	return false;			// heap depleted => check TOTAL_HEAP_SIZE!
+    }
+
+//    uint32_t before = 0;
+//    bool have_ifcnt = TMC2209_Read(drv, TMC_IFCNT, &before);
 
     /* GCONF: pdn_disable (bit 6) is REQUIRED when using UART, otherwise the
      * PDN_UART pin function interferes. mstep_reg_select (bit 7) lets us set
      * microsteps by register instead of the MS1/MS2 pins.
      * I_scale_analog (bit 0) stays set so VREF still scales the current. */
-    TMC2209_Write(drv, TMC_GCONF, (1u << 6) | (1u << 7) | (1u << 0));
+
+    // TMC2209_Write(drv, TMC_GCONF, (1u << 6) | (1u << 7) | (1u << 0));
+    TMC2209_Write(drv, TMC_GCONF, (1u << 6) | (1u << 7));   	// Bit 0=0 => Stromreferenz kommt aus interner Versorgung, IHOLD_IRUN bestimmt Strom direkt & vollständig per Register
 
     /* Clear any latched reset/error flags (write 1 to clear). */
     TMC2209_Write(drv, TMC_GSTAT, 0x07);
@@ -124,11 +163,14 @@ bool TMC2209_Init(TMC2209 *drv, UART_HandleTypeDef *huart, uint8_t addr)
     TMC2209_SetCurrent(drv, 16, 8);
 
     /* Verify the writes actually landed: IFCNT increments per accepted write. */
-    uint32_t after = 0;
-    if (have_ifcnt && TMC2209_Read(drv, TMC_IFCNT, &after)) {
-        return (uint8_t)after != (uint8_t)before;
+    uint32_t gconf = 0;
+    if (!TMC2209_Read(drv, TMC_GCONF, &gconf)) {
+        return false;		// Chip antwortet nicht --> Hardware-Problem!
     }
-    return false;
+
+//    uart_success = 1;
+
+    return (gconf & ((1u << 6) | (1u << 7))) == ((1u << 6) | (1u << 7));
 }
 
 void TMC2209_SetCurrent(TMC2209 *drv, uint8_t run, uint8_t hold)
@@ -138,7 +180,7 @@ void TMC2209_SetCurrent(TMC2209 *drv, uint8_t run, uint8_t hold)
     /* IHOLD bits 4:0, IRUN bits 12:8, IHOLDDELAY bits 19:16 */
     uint32_t v = ((uint32_t)hold) |
                  ((uint32_t)run << 8) |
-                 ((uint32_t)6   << 16);
+                 ((uint32_t)6   << 16);			// IHOLDDELAY fixed on 6
     TMC2209_Write(drv, TMC_IHOLD_IRUN, v);
 }
 

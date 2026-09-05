@@ -64,8 +64,8 @@ all: main-build
 main-build: SuR_Motor_Remake.elf secondary-outputs
 
 # Tool invocations
-SuR_Motor_Remake.elf SuR_Motor_Remake.map: $(OBJS) $(USER_OBJS) C:\Users\LOQ\STM32CubeIDE\workspace_1.19.0\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "SuR_Motor_Remake.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\LOQ\STM32CubeIDE\workspace_1.19.0\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor_Remake.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+SuR_Motor_Remake.elf SuR_Motor_Remake.map: $(OBJS) $(USER_OBJS) C:\Users\larsh\Documents\MeRoSTM32\Projektarbeit\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "SuR_Motor_Remake.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\larsh\Documents\MeRoSTM32\Projektarbeit\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor_Remake.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
