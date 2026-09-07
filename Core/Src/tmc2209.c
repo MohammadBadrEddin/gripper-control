@@ -81,10 +81,10 @@ bool TMC2209_Read(TMC2209 *drv, uint8_t reg, uint32_t *val)
 
 		HAL_HalfDuplex_EnableReceiver(drv->huart);
 
-		/* Discard our own echoed request bytes (single-wire artifact). */
-		uint8_t echo[4];
-		HAL_UART_Receive(drv->huart, echo, 4, TMC_TIMEOUT);
-
+		/* Kein Echo verwerfen: Der STM32 puffert im Half-Duplex (TE/RE getoggelt)
+		 * seine eigenen Sende-Bytes NICHT. Ein vorheriges Receive(4) würde die
+		 * ersten 4 Bytes der echten Antwort auffressen -> 8-Byte-Read timeoutet.
+		 * Antwort daher direkt als 8 Bytes lesen. (Fix 07.09.2026) */
 		uint8_t rx[8];
 
 		/* commented for mutex (02.09.2026)

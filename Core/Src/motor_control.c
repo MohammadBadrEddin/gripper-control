@@ -23,10 +23,13 @@ static TIM_HandleTypeDef *s_htim;
 static TMC2209 s_drv;
 
 static volatile int32_t  s_stepsRemaining;   	// verbleibende Vollschritte
-static volatile int32_t  s_stepsToDecel;     	// Schritt, ab dem gebremst wird
-static volatile uint32_t s_arrAccel;         	// aktueller ARR-Wert (Q8-Fixpoint, Austin-Algorithmus)
-static volatile uint32_t s_arrMin;           	// ARR bei Zielgeschwindigkeit (= obere Speedgrenze)
-static volatile uint32_t s_rampStep;         	// n im Austin-Algorithmus
+static volatile uint32_t s_arrAccel;         	// aktueller ARR-Wert (Austin-Algorithmus)
+static volatile uint32_t s_arrMin;           	// ARR bei Reisegeschwindigkeit (= obere Speedgrenze)
+static volatile uint32_t s_rampStep;         	// n im Austin-Algorithmus (Beschleunigungsphase)
+static volatile uint32_t s_decelStep;        	// Restschritt-Zaehler in der Bremsphase
+static volatile uint32_t s_accelSteps;       	// Schritte bis Reisegeschwindigkeit (fuer symmetrisches Bremsen)
+static volatile bool     s_cruising = false; 	// true: Reisegeschwindigkeit erreicht -> konstante Drehzahl
+static volatile bool     s_decel    = false; 	// true: Bremsphase
 static volatile bool     s_moveActive = false;
 static volatile bool     s_pulseHigh  = false;	// Toggle-Zustand: hoch/runter
 
@@ -62,7 +65,7 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
 		vTaskDelay(pdMS_TO_TICKS(500));   /* Retry statt Halt -- per Debugger beobachtbar */
 	}
 
-    TMC2209_SetMicrosteps(&s_drv, 16);      // Wert je nach mechanischer Charakterisierung
+    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
     TMC2209_SetCurrent(&s_drv, 16, 8);      // run/hold -- per CS-Rechner anpassen
 
     HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);	// Motor jetzt erst aktivieren
@@ -90,9 +93,12 @@ bool MotorControl_Move(int32_t steps, uint32_t max_speed_sps, uint32_t accel_sps
 	    if (arrMin < MIN_ARR) arrMin = MIN_ARR;
 	    if (arrMin > MAX_ARR) arrMin = MAX_ARR;
 
-	    s_stepsToDecel   = totalSteps / 2;
 	    s_stepsRemaining = totalSteps;
 	    s_rampStep       = 0;
+	    s_decelStep      = 0;
+	    s_accelSteps     = 0;
+	    s_cruising       = false;
+	    s_decel          = false;
 	    s_arrAccel       = austin_c0(accel_sps2);
 	    s_arrMin         = arrMin;
 	    s_pulseHigh      = false;
@@ -129,7 +135,6 @@ void MotorControl_TimerISR(void)
 
 	    if (!s_pulseHigh) {
 	        s_stepsRemaining--;
-	        s_rampStep++;
 
 	        if (s_stepsRemaining <= 0) {
 	            HAL_TIM_Base_Stop_IT(s_htim);
@@ -143,12 +148,41 @@ void MotorControl_TimerISR(void)
 	            return;
 	        }
 
-	        if (s_stepsRemaining > s_stepsToDecel) {
-	            s_arrAccel = s_arrAccel - (2U * s_arrAccel) / (4U * s_rampStep + 1U);
-	            if (s_arrAccel < s_arrMin) s_arrAccel = s_arrMin;
+	        /* Trapezprofil: beschleunigen -> KONSTANTE Reisegeschwindigkeit -> bremsen.
+	         * Die Bremsphase ist genau so lang wie die Beschleunigungsphase, damit die
+	         * Drehzahl ueber die gesamte Fahrt (ausser den kurzen Rampen) konstant ist. */
+	        if (!s_decel) {
+	            /* Zum Bremsen noetige Schritte = zum Beschleunigen gebrauchte Schritte.
+	             * Vor Erreichen der Reisegeschwindigkeit ist das der laufende Zaehler,
+	             * sodass bei zu kurzer Strecke automatisch ein Dreieck entsteht. */
+	            uint32_t decelNeeded = s_cruising ? s_accelSteps : s_rampStep;
+	            if (decelNeeded == 0U) decelNeeded = 1U;
+
+	            if ((uint32_t)s_stepsRemaining <= decelNeeded) {
+	                s_decel     = true;          /* ab jetzt bremsen */
+	                s_decelStep = decelNeeded;   /* symmetrisch zur Beschleunigung */
+	            }
+	        }
+
+	        if (!s_decel) {
+	            if (!s_cruising) {
+	                /* Beschleunigen: Austin-Iteration, ARR verkleinern (schneller). */
+	                s_rampStep++;
+	                s_arrAccel = s_arrAccel - (2U * s_arrAccel) / (4U * s_rampStep + 1U);
+	                if (s_arrAccel <= s_arrMin) {
+	                    s_arrAccel   = s_arrMin;   /* Reisegeschwindigkeit erreicht */
+	                    s_cruising   = true;
+	                    s_accelSteps = s_rampStep;
+	                }
+	            }
+	            /* Reisephase: ARR bleibt s_arrMin -> konstante Drehzahl (nichts zu tun). */
 	        } else {
-	            uint32_t stepsIntoDecel = s_stepsToDecel - s_stepsRemaining;
-	            s_arrAccel = s_arrAccel + (2U * s_arrAccel) / (4U * stepsIntoDecel + 1U);
+	            /* Bremsen: Austin-Iteration rueckwaerts, ARR vergroessern (langsamer). */
+	            if (s_decelStep > 1U) {
+	                s_decelStep--;
+	                s_arrAccel = s_arrAccel + (2U * s_arrAccel) / (4U * s_decelStep + 1U);
+	                if (s_arrAccel > MAX_ARR) s_arrAccel = MAX_ARR;
+	            }
 	        }
 	        __HAL_TIM_SET_AUTORELOAD(s_htim, s_arrAccel);
 	    }

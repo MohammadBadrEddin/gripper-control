@@ -14,6 +14,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* ---- Mechanik / Auflösung -------------------------------------------------
+ * EINE Quelle der Wahrheit: die Mikroschritt-Auflösung, die MotorControl_Init
+ * per TMC2209_SetMicrosteps() in den Treiber schreibt, und die daraus
+ * abgeleiteten Weg-Konstanten. Move-Distanzen als Vielfache von USTEPS_PER_REV
+ * angeben, damit Kommando und tatsächliche Auflösung nie auseinanderlaufen. */
+#define MOTOR_FULLSTEPS_PER_REV   200u                                  /* 1,8°/Schritt */
+#define MOTOR_MICROSTEPS          1u                                    /* Vollschritt -> TMC MRES=8 */
+#define USTEPS_PER_REV            (MOTOR_FULLSTEPS_PER_REV * MOTOR_MICROSTEPS)  /* 200 */
+
 void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart);
 void MotorControlTask(void *argument);
 

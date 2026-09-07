@@ -38,34 +38,34 @@ $(wildcard ../makefile.init) \
 $(wildcard ../makefile.targets) \
 
 
-BUILD_ARTIFACT_NAME := SuR_Motor_Remake
+BUILD_ARTIFACT_NAME := SuR_Motor
 BUILD_ARTIFACT_EXTENSION := elf
 BUILD_ARTIFACT_PREFIX :=
 BUILD_ARTIFACT := $(BUILD_ARTIFACT_PREFIX)$(BUILD_ARTIFACT_NAME)$(if $(BUILD_ARTIFACT_EXTENSION),.$(BUILD_ARTIFACT_EXTENSION),)
 
 # Add inputs and outputs from these tool invocations to the build variables 
 EXECUTABLES += \
-SuR_Motor_Remake.elf \
+SuR_Motor.elf \
 
 MAP_FILES += \
-SuR_Motor_Remake.map \
+SuR_Motor.map \
 
 SIZE_OUTPUT += \
 default.size.stdout \
 
 OBJDUMP_LIST += \
-SuR_Motor_Remake.list \
+SuR_Motor.list \
 
 
 # All Target
 all: main-build
 
 # Main-build Target
-main-build: SuR_Motor_Remake.elf secondary-outputs
+main-build: SuR_Motor.elf secondary-outputs
 
 # Tool invocations
-SuR_Motor_Remake.elf SuR_Motor_Remake.map: $(OBJS) $(USER_OBJS) C:\Users\larsh\Documents\MeRoSTM32\Projektarbeit\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "SuR_Motor_Remake.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\larsh\Documents\MeRoSTM32\Projektarbeit\SuR_Motor_Remake\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor_Remake.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+SuR_Motor.elf SuR_Motor.map: $(OBJS) $(USER_OBJS) C:\Users\masou\Documents\SimReg\SimReg_Porjekt\gripper-control\STM32F767ZITX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "SuR_Motor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\masou\Documents\SimReg\SimReg_Porjekt\gripper-control\STM32F767ZITX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SuR_Motor.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
@@ -74,14 +74,14 @@ default.size.stdout: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	@echo 'Finished building: $@'
 	@echo ' '
 
-SuR_Motor_Remake.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "SuR_Motor_Remake.list"
+SuR_Motor.list: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objdump -h -S $(EXECUTABLES) > "SuR_Motor.list"
 	@echo 'Finished building: $@'
 	@echo ' '
 
 # Other Targets
 clean:
-	-$(RM) SuR_Motor_Remake.elf SuR_Motor_Remake.list SuR_Motor_Remake.map default.size.stdout
+	-$(RM) SuR_Motor.elf SuR_Motor.list SuR_Motor.map default.size.stdout
 	-@echo ' '
 
 secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST)

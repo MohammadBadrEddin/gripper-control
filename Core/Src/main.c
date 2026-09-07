@@ -493,11 +493,11 @@ void MotorInitAndTestTask(void *argument)
     MotorControl_Init(&htim3, &huart2);
 
     for (;;) {
-        MotorControl_Move(3200, 2000, 8000);   // 3200 Mikroschritte vor, 2000 sps, 8000 sps^2
+        MotorControl_Move(2 * (int32_t)USTEPS_PER_REV, 400, 3000);   // 2 Umdrehungen vor (400 Vollschritte), Reise 400 sps = 2 U/s, accel 3000 sps^2
         MotorControl_WaitIdle();
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        MotorControl_Move(-3200, 2000, 8000);  // 3200 Mikroschritte zurück
+        MotorControl_Move(-2 * (int32_t)USTEPS_PER_REV, 400, 3000);  // 2 Umdrehungen zurück, gleiche Geschwindigkeit
         MotorControl_WaitIdle();
         vTaskDelay(pdMS_TO_TICKS(500));
     }
