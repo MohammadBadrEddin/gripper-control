@@ -81,7 +81,7 @@ static void MX_TIM3_Init(void);
 
 /* USER CODE BEGIN PFP */
 //void StartStepperTestTask(void *argument);
-//void EncoderTestTask(void *argument);
+void EncoderTestTask(void *argument);
 void HeartBeatTask(void *argument);
 void MotorInitAndTestTask(void *argument);
 /* USER CODE END PFP */
@@ -139,7 +139,7 @@ int main(void)
   /* USER CODE BEGIN RTOS_THREADS */
   // xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
   xTaskCreate(MotorInitAndTestTask, "MotorCtrl", 512, NULL, 3, NULL);
-//  xTaskCreate(EncoderTestTask,      "Encoder",     512, NULL, 2, NULL);
+  xTaskCreate(EncoderTestTask,      "Encoder",     512, NULL, 2, NULL);
   xTaskCreate(HeartBeatTask,        "vHB",         128, NULL, 1, NULL);
 
   /* Start scheduler */
@@ -452,40 +452,40 @@ void StartStepperTestTask(void *argument)
   *   g_enc_deg     0..360     the same value in degrees
   *   g_enc_errors  stays 0    any climb means I2C reads are failing
   */
-//void EncoderTestTask(void *argument)
-//{
-//    (void)argument;
-//    static AS5600 enc;
-//
-//    /* Let the AS5600 power up before the first transaction. */
-//    vTaskDelay(pdMS_TO_TICKS(100));
-//
-//    /* Probe the bus. A failure here is almost always pull-ups, wiring, or the
-//     * module not being powered from 3.3 V. Retry rather than give up, so the
-//     * wiring can be fixed and seen to come alive without a reflash. */
-//    for (;;) {
-//        g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
-//        if (g_enc_present) {
-//            break;
-//        }
-//        vTaskDelay(pdMS_TO_TICKS(500));
-//    }
-//
-//    for (;;) {
-//        g_enc_magnet = AS5600_MagnetOK(&enc) ? 1u : 0u;
-//
-//        uint16_t raw = AS5600_ReadRaw(&enc);
-//        if (raw == 0xFFFF) {
-//            g_enc_errors++;
-//        } else {
-//            g_enc_raw = raw;
-//            g_enc_deg = raw * (360.0f / 4096.0f);
-//            g_enc_samples++;
-//        }
-//
-//        vTaskDelay(pdMS_TO_TICKS(100));   /* 10 Hz */
-//    }
-//}
+void EncoderTestTask(void *argument)
+{
+    (void)argument;
+    static AS5600 enc;
+
+    /* Let the AS5600 power up before the first transaction. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Probe the bus. A failure here is almost always pull-ups, wiring, or the
+     * module not being powered from 3.3 V. Retry rather than give up, so the
+     * wiring can be fixed and seen to come alive without a reflash. */
+    for (;;) {
+        g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
+        if (g_enc_present) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    for (;;) {
+        g_enc_magnet = AS5600_MagnetOK(&enc) ? 1u : 0u;
+
+        uint16_t raw = AS5600_ReadRaw(&enc);
+        if (raw == 0xFFFF) {
+            g_enc_errors++;
+        } else {
+            g_enc_raw = raw;
+            g_enc_deg = raw * (360.0f / 4096.0f);
+            g_enc_samples++;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));   /* 10 Hz */
+    }
+}
 
 void MotorInitAndTestTask(void *argument)
 {
