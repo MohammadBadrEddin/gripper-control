@@ -220,3 +220,55 @@ void TMC2209_Stop(TMC2209 *drv)
 {
     TMC2209_Write(drv, TMC_VACTUAL, 0);
 }
+
+/* ---- StallGuard / CoolStep / diagnostics -------------------------------- */
+
+void TMC2209_SetStallguardThreshold(TMC2209 *drv, uint8_t sgthrs)
+{
+    TMC2209_Write(drv, TMC_SGTHRS, sgthrs);
+}
+
+void TMC2209_SetCoolStepThreshold(TMC2209 *drv, uint32_t tcoolthrs)
+{
+    TMC2209_Write(drv, TMC_TCOOLTHRS, tcoolthrs & 0x000FFFFF);   /* 20-bit */
+}
+
+bool TMC2209_ReadStallGuard(TMC2209 *drv, uint16_t *sg_result)
+{
+    uint32_t v;
+    if (!TMC2209_Read(drv, TMC_SG_RESULT, &v)) {
+        return false;
+    }
+    *sg_result = (uint16_t)(v & 0x03FF);   /* 10-bit */
+    return true;
+}
+
+bool TMC2209_ReadTStep(TMC2209 *drv, uint32_t *tstep)
+{
+    uint32_t v;
+    if (!TMC2209_Read(drv, TMC_TSTEP, &v)) {
+        return false;
+    }
+    *tstep = v & 0x000FFFFF;   /* 20-bit; 0xFFFFF = standstill/overflow */
+    return true;
+}
+
+bool TMC2209_ReadStatus(TMC2209 *drv, TMC2209_Status *st)
+{
+    uint32_t v;
+    if (!TMC2209_Read(drv, TMC_DRV_STATUS, &v)) {
+        return false;
+    }
+    st->otpw      = (v >> 0)  & 0x1;
+    st->ot        = (v >> 1)  & 0x1;
+    st->s2ga      = (v >> 2)  & 0x1;
+    st->s2gb      = (v >> 3)  & 0x1;
+    st->s2vsa     = (v >> 4)  & 0x1;
+    st->s2vsb     = (v >> 5)  & 0x1;
+    st->ola       = (v >> 6)  & 0x1;
+    st->olb       = (v >> 7)  & 0x1;
+    st->cs_actual = (v >> 16) & 0x1F;
+    st->stealth   = (v >> 30) & 0x1;
+    st->stst      = (v >> 31) & 0x1;
+    return true;
+}
