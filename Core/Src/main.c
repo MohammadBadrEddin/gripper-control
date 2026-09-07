@@ -19,14 +19,13 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "tmc2209.h"
-/* #include "as5600.h" */   /* enable once I2C1 is configured for the encoder */
+#include "as5600.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,6 +36,11 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* Set to 1 to re-enable the stepper and encoder test tasks. Keep at 0 while
+ * debugging the TMC2209 UART link: the stepper task busy-waits at a higher
+ * priority and will preempt the probe mid-datagram. */
+#define ENABLE_MOTION_TASKS   0
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -46,9 +50,69 @@
 
 /* Private variables ---------------------------------------------------------*/
 
+I2C_HandleTypeDef hi2c1;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+
+/* ---------------------------------------------------------------------------
+ * Encoder telemetry. Declared volatile and at file scope so they can be watched
+ * live in the debugger (Expressions view). There is no serial console here,
+ * since USART2 is dedicated to the TMC2209 in half-duplex mode.
+ *
+ * Add to Expressions:  g_enc_present, g_enc_magnet, g_enc_raw,
+ *                      g_enc_deg, g_enc_errors, g_enc_samples
+ * ------------------------------------------------------------------------- */
+volatile uint8_t  g_enc_present = 0;    /* 1 = AS5600 ACKed on the I2C bus    */
+volatile uint8_t  g_enc_magnet  = 0;    /* 1 = magnet detected (MD bit)       */
+volatile uint16_t g_enc_raw     = 0;    /* last raw count, 0..4095            */
+volatile float    g_enc_deg     = 0.0f; /* last angle in degrees, 0..360      */
+volatile uint32_t g_enc_errors  = 0;    /* cumulative failed reads            */
+volatile uint32_t g_enc_samples = 0;    /* cumulative successful reads        */
+
+/* ---------------------------------------------------------------------------
+ * TMC2209 UART probe telemetry.
+ *
+ * The link is not answering, so this captures the RAW bytes on the wire rather
+ * than relying on the library's parser. Watch these in the debugger:
+ *
+ *   g_uart_tx[a][0..3]   the 4-byte read request actually transmitted
+ *   g_uart_rx[a][0..15]  everything received afterwards, unparsed
+ *   g_uart_nrx[a]        how many bytes actually arrived (0..12)
+ *   g_uart_echo_ok[a]    1 = the first 4 rx bytes match the request we sent
+ *   g_uart_crc_ok[a]     1 = the 8-byte reply passed CRC
+ *   g_uart_val[a]        decoded 32-bit register value when crc_ok
+ *   g_uart_flags[a]      sticky error flags: b0=ORE b1=FE b2=NE
+ *   g_uart_isr[a]        USART2->ISR snapshot after the exchange
+ *   g_uart_pass          increments each full sweep of all 4 addresses
+ *
+ * Expected transmitted bytes (IOIN read, reg 0x06), precomputed CRC8-ATM:
+ *   addr 0 -> 05 00 06 6F
+ *   addr 1 -> 05 01 06 D9
+ *   addr 2 -> 05 02 06 34
+ *   addr 3 -> 05 03 06 82
+ * If g_uart_tx does not match these, the CRC or framing is wrong.
+ *
+ * How to read the results:
+ *   echo_ok = 0, nrx = 0     nothing on the wire: pin mapping, AF, or wiring
+ *   echo_ok = 1, nrx = 4     TX works and echoes, driver never replies:
+ *                            node address, PDN_UART routing, or motor supply
+ *   echo_ok = 1, nrx = 12,
+ *   crc_ok = 1               link is good; g_uart_val holds IOIN
+ * ------------------------------------------------------------------------- */
+volatile uint8_t  g_uart_tx[4][4];
+volatile uint8_t  g_uart_rx[4][16];
+volatile uint8_t  g_uart_txn[4];        /* 0 = all 4 bytes went out           */
+volatile uint8_t  g_uart_rxn[4];        /* 0 = full 12 bytes received         */
+volatile uint8_t  g_uart_nonzero[4];    /* non-zero byte count in g_uart_rx   */
+volatile uint32_t g_uart_pass = 0;      /* sweeps completed                   */
+volatile uint32_t g_uart_isr[4];        /* USART2->ISR after the exchange     */
+volatile uint8_t  g_uart_flags[4];      /* sticky: b0=ORE b1=FE b2=NE         */
+volatile uint8_t  g_uart_echo_ok[4];    /* 1 = first 4 rx bytes match request */
+volatile uint8_t  g_uart_nrx[4];        /* how many bytes actually arrived    */
+volatile uint8_t  g_uart_crc_ok[4];     /* 1 = 8-byte reply passed CRC        */
+volatile uint32_t g_uart_val[4];        /* decoded 32-bit register value      */
 
 /* USER CODE END PV */
 
@@ -56,9 +120,14 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
 
 /* USER CODE BEGIN PFP */
+#if ENABLE_MOTION_TASKS
 void StartStepperTestTask(void *argument);
+void EncoderTestTask(void *argument);
+#endif
+void UartProbeTask(void *argument);
 void HeartBeatTask(void *argument);
 /* USER CODE END PFP */
 
@@ -97,12 +166,12 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 
-  /* Keep the TMC2209 output stage DISABLED until the task has configured it.
+  /* Keep the TMC2209 output stage DISABLED until a task configures it.
    * EN is active-low, so HIGH = outputs off. MX_GPIO_Init() drives it LOW,
-   * which would energise the motor at an unknown current before any software
-   * configuration runs -- undo that here, immediately after GPIO init. */
+   * which would energise the motor before any software setup runs. */
   HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_SET);
 
   /* USER CODE END 2 */
@@ -124,11 +193,12 @@ int main(void)
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* definition and creation of defaultTask */
-
-
   /* USER CODE BEGIN RTOS_THREADS */
+#if ENABLE_MOTION_TASKS
   xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
+  xTaskCreate(EncoderTestTask,      "Encoder",     512, NULL, 2, NULL);
+#endif
+  xTaskCreate(UartProbeTask,        "UartProbe",   512, NULL, 2, NULL);
   xTaskCreate(HeartBeatTask,        "vHB",         128, NULL, 1, NULL);
   /* USER CODE END RTOS_THREADS */
 
@@ -206,6 +276,54 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x20404768;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Analogue filter
+  */
+  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Digital filter
+  */
+  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -255,9 +373,9 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_RESET);
@@ -303,15 +421,21 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+#if ENABLE_MOTION_TASKS
+
 /**
-  * @brief  Open-loop TMC2209 bring-up test over UART (VACTUAL velocity mode).
+  * @brief  Open-loop stepper test using STEP/DIR (standalone mode).
   *
-  * No STEP pulses are generated: in VACTUAL mode the TMC2209 runs its own
-  * internal step generator, so this exercises the UART path in isolation.
+  * UART/VACTUAL control is not used here: the TMC2209 UART link is still
+  * unresolved, while STEP/DIR is confirmed working. In this mode microstepping
+  * comes from the MS1/MS2 straps and motor current from the VREF pot -- there
+  * is no software control of either.
   *
-  * Expected behaviour: forward 2 s, pause 0.5 s, reverse 2 s, pause 0.5 s,
-  * repeating. At VACTUAL 10000 (~7150 Hz) with 16 microsteps on a 200-step
-  * motor that is roughly 2.2 rev/s.
+  * Behaviour: 400 steps one way, pause 0.5 s, reverse, repeat.
+  *
+  * NOTE: the busy-wait below runs at priority 3 for roughly 90 ms without
+  * yielding. It will preempt UartProbeTask mid-datagram. Do not run this task
+  * and the UART probe at the same time.
   */
 void StartStepperTestTask(void *argument)
 {
@@ -322,7 +446,8 @@ void StartStepperTestTask(void *argument)
     vTaskDelay(pdMS_TO_TICKS(10));
 
     for (;;) {
-        /* 400 steps, ~1 ms per step (500 us high + 500 us low) */
+        /* Busy-wait pulse timing. The loop count is empirical -- raise it to
+         * slow the motor down, lower it to speed up. */
         for (int i = 0; i < 400; i++) {
             HAL_GPIO_WritePin(TMC_STEP_GPIO_Port, TMC_STEP_Pin, GPIO_PIN_SET);
             for (volatile int d = 0; d < 5000; d++) { __NOP(); }
@@ -332,8 +457,222 @@ void StartStepperTestTask(void *argument)
 
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        /* reverse */
-        HAL_GPIO_TogglePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin);
+        HAL_GPIO_TogglePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin);   /* reverse */
+    }
+}
+
+/**
+  * @brief  AS5600 encoder read test.
+  *
+  * Publishes results into the g_enc_* globals for inspection in the debugger.
+  * Runs at 10 Hz -- plenty for watching values change by hand, and keeps the
+  * blocking I2C reads well clear of the stepper task's timing.
+  *
+  * What to expect once wired correctly:
+  *   g_enc_present = 1        device ACKs at address 0x36
+  *   g_enc_magnet  = 1        magnet is in range
+  *   g_enc_raw     0..4095    changes as the magnet turns
+  *   g_enc_deg     0..360     the same value in degrees
+  *   g_enc_errors  stays 0    any climb means I2C reads are failing
+  */
+void EncoderTestTask(void *argument)
+{
+    (void)argument;
+    static AS5600 enc;
+
+    /* Let the AS5600 power up before the first transaction. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Probe the bus. A failure here is almost always pull-ups, wiring, or the
+     * module not being powered from 3.3 V. Retry rather than give up, so the
+     * wiring can be fixed and seen to come alive without a reflash. */
+    for (;;) {
+        g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
+        if (g_enc_present) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    for (;;) {
+        g_enc_magnet = AS5600_MagnetOK(&enc) ? 1u : 0u;
+
+        uint16_t raw = AS5600_ReadRaw(&enc);
+        if (raw == 0xFFFF) {
+            g_enc_errors++;
+        } else {
+            g_enc_raw = raw;
+            g_enc_deg = raw * (360.0f / 4096.0f);
+            g_enc_samples++;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));   /* 10 Hz */
+    }
+}
+
+#endif /* ENABLE_MOTION_TASKS */
+
+/**
+  * @brief  CRC8-ATM used by the TMC2209 UART datagrams (datasheet sec. 4.2).
+  *         Duplicated locally so the probe does not depend on the library.
+  */
+static uint8_t probe_crc(const uint8_t *data, uint8_t len)
+{
+    uint8_t crc = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        uint8_t byte = data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if ((crc >> 7) ^ (byte & 0x01)) {
+                crc = (uint8_t)((crc << 1) ^ 0x07);
+            } else {
+                crc = (uint8_t)(crc << 1);
+            }
+            byte >>= 1;
+        }
+    }
+    return crc;
+}
+
+#define PROBE_RX_MAX   12u   /* 4 echo + 8 reply */
+
+/**
+  * @brief  Collect one byte, spinning on RXNE.
+  *         Records error flags rather than silently swallowing them.
+  * @retval 1 on success, 0 on timeout.
+  */
+static uint8_t probe_getc(uint8_t *out, uint32_t timeout_ms, uint8_t *flags)
+{
+    TickType_t t0 = xTaskGetTickCount();
+
+    for (;;) {
+        uint32_t isr = USART2->ISR;
+
+        if (isr & USART_ISR_ORE) { *flags |= 0x01; __HAL_UART_CLEAR_OREFLAG(&huart2); }
+        if (isr & USART_ISR_FE)  { *flags |= 0x02; __HAL_UART_CLEAR_FEFLAG(&huart2);  }
+        if (isr & USART_ISR_NE)  { *flags |= 0x04; __HAL_UART_CLEAR_NEFLAG(&huart2);  }
+
+        if (isr & USART_ISR_RXNE) {
+            *out = (uint8_t)(USART2->RDR & 0xFFu);
+            return 1u;
+        }
+
+        if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(timeout_ms)) {
+            return 0u;
+        }
+    }
+}
+
+/**
+  * @brief  Send one byte and immediately recover its echo.
+  *
+  * In half-duplex the echo lands about one byte-time later. Reading it here
+  * keeps RDR empty and prevents the overrun that would otherwise destroy the
+  * driver's reply.
+  */
+static uint8_t probe_putc(uint8_t b, uint8_t *echo, uint8_t *flags)
+{
+    TickType_t t0 = xTaskGetTickCount();
+
+    while (!(USART2->ISR & USART_ISR_TXE)) {
+        if ((xTaskGetTickCount() - t0) > pdMS_TO_TICKS(10)) return 0u;
+    }
+    USART2->TDR = b;
+
+    return probe_getc(echo, 10u, flags);
+}
+
+/**
+  * @brief  Raw TMC2209 UART probe -- bypasses the library parser entirely.
+  *
+  * Sweeps all four node addresses, sending an IOIN read request and capturing
+  * whatever comes back verbatim into g_uart_rx. Nothing is interpreted, so a
+  * wrong assumption in the driver's echo handling cannot hide a working link.
+  *
+  * Set a breakpoint on the g_uart_pass++ line and inspect the arrays.
+  */
+void UartProbeTask(void *argument)
+{
+    (void)argument;
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* Force the state half-duplex actually needs, in case MspInit or CubeMX
+     * left something inconsistent. Both TE and RE stay set permanently. */
+    USART2->CR1 &= ~USART_CR1_UE;
+    USART2->CR2 &= ~(USART_CR2_LINEN | USART_CR2_CLKEN);
+    USART2->CR3 |=  USART_CR3_HDSEL;
+    USART2->CR1 |=  (USART_CR1_TE | USART_CR1_RE);
+    USART2->CR1 |=  USART_CR1_UE;
+
+    for (;;) {
+        for (uint8_t a = 0; a < 4; a++) {
+
+            uint8_t req[4];
+            req[0] = 0x05;
+            req[1] = a;
+            req[2] = 0x06;              /* IOIN */
+            req[3] = probe_crc(req, 3);
+
+            for (uint8_t i = 0; i < 4; i++) g_uart_tx[a][i] = req[i];
+
+            uint8_t rx[PROBE_RX_MAX] = {0};
+            uint8_t flags = 0;
+            uint8_t n = 0;
+
+            /* Flush anything stale so a leftover byte can't masquerade
+             * as part of this exchange. */
+            __HAL_UART_CLEAR_OREFLAG(&huart2);
+            __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);
+
+            /* --- request, capturing the echo byte by byte --- */
+            uint8_t tx_ok = 1;
+            for (uint8_t i = 0; i < 4 && tx_ok; i++) {
+                tx_ok = probe_putc(req[i], &rx[n], &flags);
+                if (tx_ok) n++;
+            }
+            g_uart_txn[a] = tx_ok ? 0u : 3u;
+
+            /* --- reply: 8 bytes, driver answers within ~1 ms --- */
+            while (n < PROBE_RX_MAX) {
+                if (!probe_getc(&rx[n], 10u, &flags)) break;
+                n++;
+            }
+            g_uart_rxn[a]   = (n >= PROBE_RX_MAX) ? 0u : 3u;
+            g_uart_nrx[a]   = n;
+            g_uart_isr[a]   = USART2->ISR;
+            g_uart_flags[a] = flags;
+
+            uint8_t nz = 0;
+            for (uint8_t i = 0; i < 16; i++) {
+                g_uart_rx[a][i] = (i < PROBE_RX_MAX) ? rx[i] : 0u;
+                if (g_uart_rx[a][i] != 0x00) nz++;
+            }
+            g_uart_nonzero[a] = nz;
+
+            /* Echo integrity: proves the pin drives and senses the line. */
+            g_uart_echo_ok[a] = (n >= 4 &&
+                                 rx[0] == req[0] && rx[1] == req[1] &&
+                                 rx[2] == req[2] && rx[3] == req[3]) ? 1u : 0u;
+
+            /* Reply frame: 05 FF <reg> <d3 d2 d1 d0> <crc> */
+            g_uart_crc_ok[a] = 0;
+            g_uart_val[a]    = 0;
+            if (n >= PROBE_RX_MAX && rx[4] == 0x05 && rx[5] == 0xFF) {
+                if (probe_crc(&rx[4], 7) == rx[11]) {
+                    g_uart_crc_ok[a] = 1u;
+                    g_uart_val[a] = ((uint32_t)rx[7]  << 24) |
+                                    ((uint32_t)rx[8]  << 16) |
+                                    ((uint32_t)rx[9]  <<  8) |
+                                     (uint32_t)rx[10];
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        g_uart_pass++;   /* <<< BREAKPOINT HERE, then inspect g_uart_* */
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -350,15 +689,6 @@ void HeartBeatTask(void *argument)
 }
 
 /* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-
 
 /**
   * @brief  Period elapsed callback in non blocking mode
