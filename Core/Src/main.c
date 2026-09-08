@@ -668,12 +668,18 @@ void StartStepperTestTask(void *argument)
 
 
 /**
-  * @brief  AS5600 encoder read test.
+  * @brief  AS5600 encoder read test + TMC2209 UART diagnostics, both 10 Hz.
   *
-  * Publishes results into the g_enc_* globals for inspection in the debugger,
-  * and now also over Debug_Printf() so it shows up in TeraTerm/the log file.
-  * Runs at 10 Hz -- plenty for watching values change by hand, and keeps the
-  * blocking I2C reads well clear of the stepper task's timing.
+  * Publishes encoder results into the g_enc_* globals for inspection in the
+  * debugger, and now also over Debug_Printf() so it shows up in TeraTerm/the
+  * log file. Runs at 10 Hz -- plenty for watching values change by hand, and
+  * keeps the blocking I2C reads well clear of the stepper task's timing.
+  *
+  * The encoder probe is retried every cycle WITHOUT blocking the loop -- a
+  * missing/disconnected AS5600 must never stall the TMC2209 diagnostics
+  * below, which are unconditional every cycle regardless of encoder status
+  * (that dependency used to exist and silently swallowed all logging,
+  * encoder AND TMC2209 alike, whenever the AS5600 wasn't detected).
   *
   * What to expect once wired correctly:
   *   g_enc_present = 1        device ACKs at address 0x36
@@ -690,33 +696,33 @@ void EncoderTestTask(void *argument)
     /* Let the AS5600 power up before the first transaction. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Probe the bus. A failure here is almost always pull-ups, wiring, or the
-     * module not being powered from 3.3 V. Retry rather than give up, so the
-     * wiring can be fixed and seen to come alive without a reflash. */
+    /* WICHTIG: kein blockierendes "warte bis Encoder da ist" mehr vor der
+     * Hauptschleife -- das hielt frueher auch das TMC2209-UART-Logging weiter
+     * unten fest, wenn der AS5600 (noch) nicht angeschlossen/erkannt war.
+     * Jetzt: Encoder-Init wird pro Zyklus non-blockierend nachversucht, bis
+     * er da ist; das TMC-Logging laeuft in JEDEM Zyklus, unabhaengig davon. */
     for (;;) {
-        g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
+        if (!g_enc_present) {
+            g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
+        }
+
         if (g_enc_present) {
-            break;
+            g_enc_magnet = AS5600_MagnetOK(&enc) ? 1u : 0u;
+
+            uint16_t raw = AS5600_ReadRaw(&enc);
+            if (raw == 0xFFFF) {
+                g_enc_errors++;
+            } else {
+                g_enc_raw = raw;
+                g_enc_deg = raw * (360.0f / 4096.0f);
+                g_enc_samples++;
+            }
+
+            Debug_Printf("%lu,enc,%u,%u,%u,%.2f,%lu\r\n",
+                         (unsigned long)Debug_TimestampMs(),
+                         g_enc_present, g_enc_magnet, g_enc_raw, g_enc_deg,
+                         (unsigned long)g_enc_errors);
         }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-
-    for (;;) {
-        g_enc_magnet = AS5600_MagnetOK(&enc) ? 1u : 0u;
-
-        uint16_t raw = AS5600_ReadRaw(&enc);
-        if (raw == 0xFFFF) {
-            g_enc_errors++;
-        } else {
-            g_enc_raw = raw;
-            g_enc_deg = raw * (360.0f / 4096.0f);
-            g_enc_samples++;
-        }
-
-        Debug_Printf("%lu,enc,%u,%u,%u,%.2f,%lu\r\n",
-                     (unsigned long)Debug_TimestampMs(),
-                     g_enc_present, g_enc_magnet, g_enc_raw, g_enc_deg,
-                     (unsigned long)g_enc_errors);
 
         /* ---------------------------------------------------------------
          * TMC2209-UART-Diagnose (StallGuard/DRV_STATUS/TSTEP), 10 Hz.
