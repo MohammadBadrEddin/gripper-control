@@ -126,31 +126,55 @@ Rückmeldung, dann ist USART1 (externer Adapter) die primäre statt die Alternat
 
 Beide UARTs sind im `.ioc` mit eigenem NVIC-IRQ aktiviert (Prio 5, gleiche Ebene wie USART2/
 TIM3/EXTI — sicher für `...FromISR`-Aufrufe unterhalb `configMAX_SYSCALL_INTERRUPT_PRIORITY`).
-Bewusst **kein DMA** konfiguriert: `debug_log.c` sendet interrupt-getrieben
+Bewusst **kein DMA** konfiguriert: das Logging sendet interrupt-getrieben
 (`HAL_UART_Transmit_IT` + Ringpuffer) — keine DMAMUX-Kanalzuordnung nötig, unblockierend genug
 für 200–500 Hz Logging, siehe Bandbreitenrechnung oben.
 
-### Neues Modul: `Core/{Inc,Src}/debug_log.{h,c}`
+### Debug-/Logging-Funktionen: direkt in `main.c` / `main.h`
 
-Timestamp (DWT-Zykluszähler, µs-Auflösung, kein Zusatztimer) + `DebugLog_Printf(...)`,
-nicht-blockierend. Integration nach dem Regenerieren des Projekts in CubeIDE (siehe README):
+Auf ausdrücklichen Wunsch **keine eigene Datei** — das komplette Logging (Timestamp per
+DWT-Zykluszähler, µs-Auflösung, kein Zusatztimer, + Ringpuffer + `HAL_UART_Transmit_IT`)
+lebt in `Core/Src/main.c` (USER CODE BEGIN/END 4) und wird über `Core/Inc/main.h`
+(USER CODE BEGIN/END EFP) exportiert. API:
 
 ```c
-// main.c, USER CODE BEGIN Includes
-#include "debug_log.h"
-
-// main.c, nach MX_USART3_UART_Init():
-DebugLog_Init(&huart3);
-
-// main.c, HAL_UART_TxCpltCallback():
-DebugLog_TxCpltFromISR(huart);   // huart2's Callback bleibt unverändert daneben bestehen
+void     Debug_Init(UART_HandleTypeDef *huart);   // einmal, nach MX_USART3_UART_Init()
+void     Debug_Printf(const char *fmt, ...);       // nicht-blockierend, printf-artig
+uint32_t Debug_TimestampUs(void);                  // DWT-Zykluszähler in µs
+float    Debug_TimestampMs(void);
+uint32_t Debug_Drops(void);                        // kumulierte verworfene Zeilen (Puffer voll)
 ```
+
+Aufruf in `main()` direkt nach der UART-Initialisierung:
+
+```c
+Debug_Init(&huart3);
+Debug_Printf("\r\n# gripper-control boot, STM32H753ZI, SYSCLK=%lu Hz\r\n",
+             (unsigned long)SystemCoreClock);
+```
+
+`HAL_UART_TxCpltCallback()` in `main.c` ist bereits so umgebaut, dass sie nach Instanz
+unterscheidet: USART2 (TMC2209-Telemetrie, unverändert `control_UART_Tx_Flag++`) und
+USART3/USART1 (Debug-Transport, treibt den Ringpuffer weiter) laufen nebeneinander, ohne
+sich zu stören.
+
+Aktuell aufgerufen aus `EncoderTestTask()` (10 Hz), Beispielzeile:
+
+```c
+Debug_Printf("%lu,enc,%u,%u,%u,%.2f,%lu\r\n",
+             (unsigned long)Debug_TimestampMs(),
+             g_enc_present, g_enc_magnet, g_enc_raw, g_enc_deg,
+             (unsigned long)g_enc_errors);
+```
+
+Für den Regler-Task nach demselben Muster erweitern (siehe Signalliste oben), z. B. als
+CSV-Header einmalig beim Boot und danach eine Zeile pro Regelzyklus.
 
 ---
 
 ## 5. Referenz
 
 - `Core/Inc/tmc2209.h` / `Core/Src/tmc2209.c` — StallGuard/DRV_STATUS/TSTEP-Funktionen neu
-- `Core/Inc/debug_log.h` / `Core/Src/debug_log.c` — Logging-Transport, neu
+- `Core/Src/main.c` / `Core/Inc/main.h` — Debug-/Logging-Funktionen (`Debug_*`), siehe oben
 - `docs/regelung-plan.md` — Reglerarchitektur, noch offene Punkte (P vs. PI, Encoder-Übersetzung)
 - TMC2209-Datenblatt Rev. 1.09, Abschnitt 5 (Register), 14 (StallGuard/CoolStep)

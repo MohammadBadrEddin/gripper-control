@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 /* Includes ------------------------------------------------------------------*/
-#include "stm32f7xx_hal.h"
+#include "stm32h7xx_hal.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -53,6 +53,27 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
+
+/* ---------------------------------------------------------------------------
+ * Debug / telemetry logging -- USART3 (ST-LINK VCP, PD8/PD9) by default,
+ * see Debug_Init() in main.c. Non-blocking (interrupt-driven ring buffer),
+ * timestamped via the DWT cycle counter (microsecond resolution). Capture
+ * with TeraTerm's "Terminal -> Log..." to get a CSV file straight into
+ * MATLAB (readtable/readmatrix) -- see docs/logging-signale.md.
+ *
+ *     Debug_Init(&huart3);                  // once, after MX_USART3_UART_Init()
+ *     Debug_Printf("t_ms,theta,e\r\n");
+ *     Debug_Printf("%.3f,%.3f,%.3f\r\n", Debug_TimestampMs(), theta, e);
+ *
+ * Wired into HAL_UART_TxCpltCallback() in main.c already -- nothing else to
+ * hook up. Not thread-safe against concurrent callers from multiple tasks;
+ * call it from a single task, or add a mutex around Debug_Printf if needed.
+ * ------------------------------------------------------------------------- */
+void Debug_Init(UART_HandleTypeDef *huart);
+void Debug_Printf(const char *fmt, ...);
+uint32_t Debug_TimestampUs(void);
+float Debug_TimestampMs(void);
+uint32_t Debug_Drops(void);   /* cumulative dropped lines (ring buffer was full) */
 
 /* USER CODE END EFP */
 
