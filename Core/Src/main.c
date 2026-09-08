@@ -130,8 +130,9 @@ int main(void)
 
   /* USER CODE END 1 */
 
-  /* Enable I/D cache before anything else runs -- standard STM32H7 practice
-   * (Cortex-M7 has both, F7 projects often left them off). */
+  /* Enable I/D cache before anything else runs -- the STM32F767's Cortex-M7
+   * has both, but CubeMX-generated F7 projects often leave them off by
+   * default. Worth having on for the timing-sensitive step pulses/logging. */
   CPU_CACHE_Enable();
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -169,7 +170,7 @@ int main(void)
   /* Debug/telemetry logging over the ST-LINK Virtual COM Port -- open with
    * TeraTerm at 460800 8N1. See main.h for Debug_Printf() usage. */
   Debug_Init(&huart3);
-  Debug_Printf("\r\n# gripper-control boot, STM32H753ZI, SYSCLK=%lu Hz\r\n",
+  Debug_Printf("\r\n# gripper-control boot, STM32F767ZI, SYSCLK=%lu Hz\r\n",
                (unsigned long)SystemCoreClock);
 
   /* USER CODE END 2 */
@@ -209,29 +210,22 @@ static void CPU_CACHE_Enable(void)
 }
 
 /**
-  * @brief System Clock Configuration
+  * @brief System Clock Configuration (original STM32F767ZI config, unchanged)
   *         System Clock source            = PLL (HSE)
-  *         SYSCLK(Hz)                     = 400000000 (CPU Clock)
-  *         HCLK(Hz)                       = 200000000 (AXI and AHBs Clock)
-  *         AHB Prescaler                  = 2
-  *         D1 APB3 Prescaler               = 2 (APB3 Clock  100 MHz)
-  *         D2 APB1 Prescaler               = 2 (APB1 Clock  100 MHz)
-  *         D2 APB2 Prescaler               = 2 (APB2 Clock  100 MHz)
-  *         D3 APB4 Prescaler               = 2 (APB4 Clock  100 MHz)
+  *         SYSCLK(Hz)                     = 216000000
+  *         HCLK(Hz)                       = 216000000
+  *         AHB Prescaler                  = 1
+  *         APB1 Prescaler                 = 4 (APB1 Clock  54 MHz)
+  *         APB2 Prescaler                 = 2 (APB2 Clock 108 MHz)
   *         HSE Frequency(Hz)               = 8000000
   *         PLL_M                           = 4
-  *         PLL_N                           = 400
+  *         PLL_N                           = 216
   *         PLL_P                           = 2
-  *         PLL_Q                           = 4
+  *         PLL_Q                           = 2
   *         PLL_R                           = 2
   *         VDD(V)                          = 3.3
-  *         Flash Latency(WS)               = 4
-  *
-  * Values verified against ST's own NUCLEO-H743ZI "Templates" example
-  * (identical silicon/memory map to H753 per ST; only crypto differs) --
-  * not guessed. HSE assumed 8 MHz as on the original F767ZI board this
-  * project was migrated from; confirm against your schematic if this is a
-  * custom PCB rather than a stock Nucleo-144 board.
+  *         Flash Latency(WS)               = 7
+  *         Over-Drive                      = enabled (required for 216 MHz)
   * @retval None
   */
 void SystemClock_Config(void)
@@ -239,51 +233,45 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /* Power: H7 needs the supply source configured before anything else.
-   * Nucleo-144 H7 boards use the LDO (no external SMPS inductor fitted). */
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
-
   /** Configure the main internal regulator output voltage
   */
+  __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
-
-  while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;   /* crystal on PH0/PH1, matches the original F767 config */
-  RCC_OscInitStruct.HSIState = RCC_HSI_OFF;
-  RCC_OscInitStruct.CSIState = RCC_CSI_OFF;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 400;
-  RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  RCC_OscInitStruct.PLL.PLLP = 2;
+  RCC_OscInitStruct.PLL.PLLN = 216;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
-  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_1;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Activate the Over-Drive mode
+  */
+  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_ClkInitStruct.ClockType = (RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_D1PCLK1 |
-                                  RCC_CLOCKTYPE_PCLK1  | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1);
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_7) != HAL_OK)
   {
     Error_Handler();
   }
@@ -305,14 +293,8 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  /* !!! TIMING CARRIED OVER FROM THE F767 PROJECT, LIKELY WRONG NOW !!!
-   * This raw TIMINGR value was computed by CubeMX for the F7 project's I2C1
-   * kernel clock (54 MHz APB1). On H753 with this clock tree, I2C1's kernel
-   * clock is 100 MHz (D2PCLK1, see HAL_I2C_MspInit -> RCC_I2C1235CLKSOURCE_
-   * D2PCLK1) -- a different kernel clock needs a different TIMINGR. Open
-   * this project in STM32CubeMX/CubeIDE, go to the I2C1 Parameter Settings
-   * view (Standard Mode, 100 kHz target), and let it recompute Timing --
-   * don't trust this value on real hardware until you have. */
+  /* CubeMX-computed TIMINGR for I2C1 kernel clock = PCLK1 = 54 MHz
+   * (APB1CLKDivider = /4 off the 216 MHz SYSCLK), Standard Mode 100 kHz. */
   hi2c1.Init.Timing = 0x20404768;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
@@ -364,11 +346,11 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  /* PSC recomputed for H753: TIM3 is on APB1 (D2PPRE1=DIV2 -> 100 MHz), and
-   * timer kernel clock is 2x APB when the APB divider != 1, so 200 MHz here
-   * (was 108 MHz on F767). PSC=199 -> 200 MHz/(199+1) = 1 MHz tick, matching
-   * motor_control.c's TIM3_CLK_HZ=1000000UL assumption unchanged. */
-  htim3.Init.Prescaler = 199;
+  /* TIM3 is on APB1 (54 MHz, /4 off 216 MHz SYSCLK); timer kernel clock is
+   * 2x APB when the APB divider != 1, so 108 MHz here. PSC=107 ->
+   * 108 MHz/(107+1) = 1 MHz tick, matching motor_control.c's
+   * TIM3_CLK_HZ=1000000UL assumption. */
+  htim3.Init.Prescaler = 107;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 65535;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;

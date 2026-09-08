@@ -1,4 +1,4 @@
-# Datenlogging & Signale — Gripper-Control (STM32H753ZI)
+# Datenlogging & Signale — Gripper-Control (STM32F767ZI)
 
 > Antwort auf: Timestamp+Signale für MATLAB-Offline-Auswertung, lokales Speichern via
 > TeraTerm, benötigte Signale für Reglerentwurf, Fullstep, StallGuard/Treiber-Features,
@@ -120,7 +120,7 @@ muss nicht mit der Regelrate mitlaufen), SGTHRS/TCOOLTHRS experimentell einstell
 | **USART1** | PA9 (TX) / PA10 (RX) | Alternative: externer USB-UART-Adapter (FTDI/CP2102/CH340, 3.3 V!), z. B. wenn der ST-LINK-Port für etwas anderes gebraucht wird oder auf einem Custom-Board ohne VCP-Verdrahtung. | 460800 8N1 |
 | USART2 | PD5, Half-Duplex | unverändert — TMC2209-Konfiguration/Telemetrie | 115200 |
 
-Annahme: NUCLEO-H753ZI-Board (Nucleo-144-Formfaktor) mit HSE 8 MHz und USART3-VCP-Routing wie
+Annahme: NUCLEO-F767ZI-Board (Nucleo-144-Formfaktor) mit HSE 8 MHz und USART3-VCP-Routing wie
 beim offiziellen Board — falls es sich um ein Custom-PCB ohne diese Verdrahtung handelt, bitte
 Rückmeldung, dann ist USART1 (externer Adapter) die primäre statt die Alternativ-Option.
 
@@ -149,7 +149,7 @@ Aufruf in `main()` direkt nach der UART-Initialisierung:
 
 ```c
 Debug_Init(&huart3);
-Debug_Printf("\r\n# gripper-control boot, STM32H753ZI, SYSCLK=%lu Hz\r\n",
+Debug_Printf("\r\n# gripper-control boot, STM32F767ZI, SYSCLK=%lu Hz\r\n",
              (unsigned long)SystemCoreClock);
 ```
 

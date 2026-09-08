@@ -24,7 +24,7 @@
 #ifndef TMC2209_H
 #define TMC2209_H
 
-#include "stm32h7xx_hal.h"   /* migrated F767ZI -> H753ZI; regenerate via CubeIDE first */
+#include "stm32f7xx_hal.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include "FreeRTOS.h"	// included for use of mutex (02.09.2026)
