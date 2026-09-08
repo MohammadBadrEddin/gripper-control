@@ -34,6 +34,9 @@ static volatile bool     s_moveActive = false;
 static volatile bool     s_pulseHigh  = false;	// Toggle-Zustand: hoch/runter
 static volatile bool     s_driverReady = false;	// true erst NACH erfolgreichem TMC2209_Init()
 
+static volatile int32_t  s_positionFullSteps = 0;	// absolute Position seit Boot, in VOLLSCHRITTEN
+static volatile int32_t  s_moveDirSign = 1;			// +1/-1, pro Move() aus dem Vorzeichen von steps gesetzt
+
 // Task, der gerade auf WaitIdle() wartet --> wird bei jedem Move-Aufruf neu gesetzt
 static volatile TaskHandle_t s_waitingTask = NULL;
 
@@ -94,6 +97,11 @@ TMC2209 *MotorControl_GetDriver(void)
     return s_driverReady ? &s_drv : NULL;
 }
 
+int32_t MotorControl_GetPositionMicrosteps(void)
+{
+    return s_positionFullSteps * (int32_t)MOTOR_MICROSTEPS;
+}
+
 /* ---------------------------------------------------------------------------
  * Öffentliche API: Bewegung anstoßen (non-blocking, geht in die Queue)
  * ------------------------------------------------------------------------- */
@@ -105,8 +113,10 @@ bool MotorControl_Move(int32_t steps, uint32_t max_speed_sps, uint32_t accel_sps
 
 	    if (steps > 0) {
 	        HAL_GPIO_WritePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin, GPIO_PIN_SET);
+	        s_moveDirSign = 1;
 	    } else {
 	        HAL_GPIO_WritePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin, GPIO_PIN_RESET);
+	        s_moveDirSign = -1;
 	    }
 	    vTaskDelay(1);   /* DIR->STEP Setup-Zeit */
 
@@ -158,6 +168,7 @@ void MotorControl_TimerISR(void)
 
 	    if (!s_pulseHigh) {
 	        s_stepsRemaining--;
+	        s_positionFullSteps += s_moveDirSign;	// Positions-Tracking fuer 1kHz-Telemetrie
 
 	        if (s_stepsRemaining <= 0) {
 	            HAL_TIM_Base_Stop_IT(s_htim);

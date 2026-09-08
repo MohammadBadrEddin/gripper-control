@@ -52,6 +52,14 @@ typedef struct {
     UART_HandleTypeDef *huart;
     uint8_t addr;
     SemaphoreHandle_t mutex;   // NEW: protects any UART-Transaction, included for use of mutex (02.09.2026)
+
+    /* Schattenwerte fuer 1kHz-Telemetrie (main.c/EncoderTestTask): das, was
+     * zuletzt tatsaechlich in VACTUAL/IHOLD_IRUN geschrieben wurde. Kein
+     * Bus-Zugriff noetig, um sie zu lesen -- bei 460800 Baud kostet ein
+     * einzelner Register-READ schon ~260us, fuer ein 1ms-Budget ist da kein
+     * Platz fuer zusaetzliche Reads, die der Code sowieso schon kennt. */
+    volatile int32_t vactual_shadow;   /* zuletzt per MoveVelocity/Stop geschriebener VACTUAL-Wert */
+    volatile uint8_t irun_shadow;      /* zuletzt per SetCurrent geschriebener IRUN-Wert, 0..31 */
 } TMC2209;
 
 /**
@@ -134,5 +142,16 @@ bool TMC2209_ReadTStep(TMC2209 *drv, uint32_t *tstep);
  *  (overcurrent, overtemp, stall/standstill, StealthChop/SpreadCycle state,
  *  actual current scale). Returns false on a communication error. */
 bool TMC2209_ReadStatus(TMC2209 *drv, TMC2209_Status *st);
+
+/* ---- Schattenwerte, kein Bus-Zugriff (siehe Kommentar am Struct) -------- */
+
+/** Zuletzt per TMC2209_MoveVelocity()/TMC2209_Stop() geschriebener VACTUAL-
+ *  Wert. In dieser Firmware laeuft die Bewegung normalerweise ueber
+ *  STEP/DIR (motor_control.c), nicht ueber VACTUAL -- dann bleibt das 0,
+ *  und das ist ein korrekter, kein fehlender Messwert. */
+int32_t TMC2209_GetVActual(TMC2209 *drv);
+
+/** Zuletzt per TMC2209_SetCurrent() geschriebener IRUN-Wert, 0..31. */
+uint8_t TMC2209_GetIrun(TMC2209 *drv);
 
 #endif /* TMC2209_H */

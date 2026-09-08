@@ -35,6 +35,13 @@ void MotorControlTask(void *argument);
  * IMMER auf NULL pruefen, bevor der Pointer an TMC2209_Read*() übergeben wird. */
 TMC2209 *MotorControl_GetDriver(void);
 
+/* Absolute Position in MIKROSCHRITTEN (nicht Vollschritten), seit Boot, aus
+ * der ISR fortgeschrieben -- kein Bus-Zugriff, kostet nichts, darum fuer
+ * 1kHz-Telemetrie geeignet. Skaliert mit MOTOR_MICROSTEPS, das (per
+ * Vorgabe) fest verdrahtet ist und nicht zur Laufzeit wechselt: ein
+ * kompletter STEP-Puls entspricht immer MOTOR_MICROSTEPS Mikroschritten. */
+int32_t MotorControl_GetPositionMicrosteps(void);
+
 // Startet eine Bewegung, blockiert NICHT. Gibt false zurück, falls bereits eine Bewegung läuft
 bool MotorControl_Move(int32_t steps, uint32_t max_speed_sps, uint32_t accel_sps2);
 

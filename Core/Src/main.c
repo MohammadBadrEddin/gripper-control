@@ -172,6 +172,7 @@ int main(void)
   Debug_Init(&huart3);
   Debug_Printf("\r\n# gripper-control boot, STM32F767ZI, SYSCLK=%lu Hz\r\n",
                (unsigned long)SystemCoreClock);
+  Debug_Printf("# t_ms,vactual,enc_raw,step_cnt,sg_result,i_run_akt\r\n");
 
   /* USER CODE END 2 */
 
@@ -426,7 +427,14 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  /* 460800 statt 115200: bei 115200 Baud dauert allein ein SG_RESULT-Read
+   * (4-Byte-Request + 8-Byte-Reply) ~1,04ms auf dem Draht -- das sprengt ein
+   * 1ms-Log-Intervall sofort, ohne jede Reserve fuer Scheduling-Jitter oder
+   * den I2C-Encoder-Read im selben Zyklus. Bei 460800 Baud sinkt derselbe
+   * Read auf ~260us, was fuer die 1kHz-Telemetrie (siehe EncoderTestTask)
+   * noetig ist. Der TMC2209 erkennt die Baudrate am ersten Telegramm
+   * automatisch neu, keine Aenderung am Treiber-IC noetig. */
+  huart2.Init.BaudRate = 460800;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -564,13 +572,25 @@ void Debug_Init(UART_HandleTypeDef *huart)
 uint32_t Debug_TimestampUs(void)
 {
   /* Wraps at 2^32 us (~71.6 min) -- treat a decreasing timestamp in the log
-   * as "wrapped", not an error; well outside a lab session either way. */
+   * as "wrapped", not an error; well outside a lab session either way.
+   * NICHT mehr die Quelle fuer Debug_TimestampMs() (siehe dort) -- bleibt
+   * hier nur noch fuer den Fall stehen, dass mal wirklich us-Aufloesung
+   * gebraucht wird; dafuer muesste vorher DWT->LAR = 0xC5ACCE55 entsperrt
+   * werden (Cortex-M7 Lock Access Register), sonst zaehlt CYCCNT nicht. */
   return DWT->CYCCNT / (SystemCoreClock / 1000000u);
 }
 
 float Debug_TimestampMs(void)
 {
-  return (float)Debug_TimestampUs() / 1000.0f;
+  /* Zeitbasis = FreeRTOS-Tick, NICHT mehr DWT->CYCCNT: der DWT-Zykluszaehler
+   * lief auf diesem Cortex-M7 nie (t_ms war deshalb immer 0) -- er braucht
+   * zusaetzlich zu TRCENA/CYCCNTENA ein Unlock ueber DWT->LAR, sonst werden
+   * Schreibzugriffe auf DWT->CTRL/CYCCNT stillschweigend ignoriert. Der
+   * FreeRTOS-Tick laeuft dagegen garantiert (configTICK_RATE_HZ=1000 ->
+   * exakt 1ms/Tick, siehe FreeRTOSConfig.h) und ist zugleich die gemeinsame
+   * Zeitbasis fuer ALLE Telemetriefelder in EncoderTestTask -- genau das
+   * war hier gefordert. */
+  return (float)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
 }
 
 uint32_t Debug_Drops(void)
@@ -668,25 +688,47 @@ void StartStepperTestTask(void *argument)
 
 
 /**
-  * @brief  AS5600 encoder read test + TMC2209 UART diagnostics, both 10 Hz.
+  * @brief  1kHz-Telemetrie: t_ms, vactual, enc_raw, step_cnt, sg_result,
+  *         i_run_akt -- alle auf derselben Zeitbasis (FreeRTOS-Tick).
   *
-  * Publishes encoder results into the g_enc_* globals for inspection in the
-  * debugger, and now also over Debug_Printf() so it shows up in TeraTerm/the
-  * log file. Runs at 10 Hz -- plenty for watching values change by hand, and
-  * keeps the blocking I2C reads well clear of the stepper task's timing.
+  * Ersetzt die fruehere getrennte 10Hz-Encoder-/TMC-Diagnoseausgabe. Format
+  * (eine Zeile pro ms):
   *
-  * The encoder probe is retried every cycle WITHOUT blocking the loop -- a
-  * missing/disconnected AS5600 must never stall the TMC2209 diagnostics
-  * below, which are unconditional every cycle regardless of encoder status
-  * (that dependency used to exist and silently swallowed all logging,
-  * encoder AND TMC2209 alike, whenever the AS5600 wasn't detected).
+  *   t_ms,vactual,enc_raw,step_cnt,sg_result,i_run_akt
   *
-  * What to expect once wired correctly:
-  *   g_enc_present = 1        device ACKs at address 0x36
-  *   g_enc_magnet  = 1        magnet is in range
-  *   g_enc_raw     0..4095    changes as the magnet turns
-  *   g_enc_deg     0..360     the same value in degrees
-  *   g_enc_errors  stays 0    any climb means I2C reads are failing
+  *   t_ms       uint32_t   FreeRTOS-Tick * portTICK_PERIOD_MS (=1ms/Tick,
+  *                         siehe Debug_TimestampMs()) -- gemeinsame
+  *                         Zeitbasis fuer ALLE Felder dieser Zeile.
+  *   vactual    int32_t    zuletzt tatsaechlich ins VACTUAL-Register
+  *                         geschriebener Wert (Schattenwert, kein Bus-Read
+  *                         noetig) -- in dieser Firmware laeuft die Bewegung
+  *                         ueber STEP/DIR, VACTUAL bleibt daher normal 0.
+  *   enc_raw    uint16_t   AS5600 RAW ANGLE, 0..4095, unumgerechnet.
+  *   step_cnt   int32_t    absolute Position seit Boot, in MIKROSCHRITTEN
+  *                         (nicht Vollschritten) -- aus der TIM3-ISR
+  *                         fortgeschrieben, kein Bus-Read noetig.
+  *   sg_result  uint16_t   TMC2209 SG_RESULT (Reg 0x41), 0..510 (10 Bit
+  *                         maskiert) -- der einzige echte Bus-Read pro
+  *                         Zyklus, siehe Baudraten-Kommentar in
+  *                         MX_USART2_UART_Init(). 0, solange der Read
+  *                         fehlschlaegt oder der Treiber noch nicht bereit
+  *                         ist (siehe Timing-Hinweis unten).
+  *   i_run_akt  uint8_t    aktuell gesetzter IRUN-Wert, 0..31 (Schattenwert,
+  *                         kein Bus-Read -- es gibt kein aktives
+  *                         CoolStep-Autoscaling ueber COOLCONF, IRUN aendert
+  *                         sich also nur durch einen expliziten
+  *                         TMC2209_SetCurrent()-Aufruf).
+  *
+  * Timing-Budget bei 1kHz (vTaskDelay(1)): I2C-Read AS5600 (~150-200us) +
+  * UART-Read SG_RESULT bei 460800 Baud (~260-400us inkl. HAL-Overhead) +
+  * Formatierung/Ringpuffer (paar us) -- bleibt unter 1ms, aber ohne grosse
+  * Reserve. Falls t_ms in der Aufzeichnung Luecken oder doppelte Werte
+  * zeigt, ist das das Signal fuer einen Task-Overrun (dann Reads entkoppeln
+  * oder Rate senken).
+  *
+  * Die Zeile wird JEDEN Zyklus geschrieben, auch bevor Encoder/Treiber
+  * bereit sind (Werte dann 0) -- damit bleibt das Zeitraster fuer die
+  * spaetere Auswertung durchgehend, statt Luecken beim Start zu haben.
   */
 void EncoderTestTask(void *argument)
 {
@@ -696,11 +738,6 @@ void EncoderTestTask(void *argument)
     /* Let the AS5600 power up before the first transaction. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* WICHTIG: kein blockierendes "warte bis Encoder da ist" mehr vor der
-     * Hauptschleife -- das hielt frueher auch das TMC2209-UART-Logging weiter
-     * unten fest, wenn der AS5600 (noch) nicht angeschlossen/erkannt war.
-     * Jetzt: Encoder-Init wird pro Zyklus non-blockierend nachversucht, bis
-     * er da ist; das TMC-Logging laeuft in JEDEM Zyklus, unabhaengig davon. */
     for (;;) {
         if (!g_enc_present) {
             g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
@@ -717,54 +754,27 @@ void EncoderTestTask(void *argument)
                 g_enc_deg = raw * (360.0f / 4096.0f);
                 g_enc_samples++;
             }
-
-            Debug_Printf("%lu,enc,%u,%u,%u,%.2f,%lu\r\n",
-                         (unsigned long)Debug_TimestampMs(),
-                         g_enc_present, g_enc_magnet, g_enc_raw, g_enc_deg,
-                         (unsigned long)g_enc_errors);
         }
 
-        /* ---------------------------------------------------------------
-         * TMC2209-UART-Diagnose (StallGuard/DRV_STATUS/TSTEP), 10 Hz.
-         *
-         * Zweck: erzeugt periodischen, VORHERSEHBAREN Request/Reply-Verkehr
-         * auf PD5 (USART2), damit der Logic Analyzer dort etwas zu sehen
-         * bekommt -- bisher lief nach dem einmaligen Boot-Handshake in
-         * MotorControl_Init() (GCONF-Readback) gar kein UART-Traffic mehr,
-         * darum "receiven wir nichts": es wurde schlicht nichts mehr
-         * angefragt. Jede Zeile hier meldet zusaetzlich per ok_*-Flag, ob
-         * die Antwort beim STM32 als gueltig (Sync+Adresse+CRC) ankam --
-         * damit laesst sich am Logic Analyzer (elektrisch: kommen Bytes
-         * zurueck?) direkt gegen TeraTerm (Software: wurden sie geparst?)
-         * gegenpruefen, statt raten zu muessen ob es ein Verdrahtungs-
-         * oder ein Firmware-Problem ist.
-         * ------------------------------------------------------------- */
+        int32_t  vactual   = 0;
+        uint16_t sg_result = 0;
+        uint8_t  irun_akt  = 0;
+
         TMC2209 *drv = MotorControl_GetDriver();
         if (drv != NULL) {
-            uint16_t sg_result = 0;
-            uint32_t tstep = 0;
-            TMC2209_Status st = {0};
-
-            bool ok_sg  = TMC2209_ReadStallGuard(drv, &sg_result);
-            bool ok_ts  = TMC2209_ReadTStep(drv, &tstep);
-            bool ok_st  = TMC2209_ReadStatus(drv, &st);
-
-            Debug_Printf("%lu,tmc,%d,%u,%d,%lu,%d,%u,%u,%u,%u\r\n",
-                         (unsigned long)Debug_TimestampMs(),
-                         ok_sg, sg_result,
-                         ok_ts, (unsigned long)tstep,
-                         ok_st, st.cs_actual, st.otpw, st.ot, st.stealth);
-        } else {
-            /* Treiber noch nicht initialisiert (MotorControl_Init laeuft
-             * noch in seiner Retry-Schleife) -- einmal pro Sekunde vermerken,
-             * statt die Logzeilen mit "drv=NULL" zuzuspammen. */
-            static uint32_t s_notReadyCount = 0;
-            if ((s_notReadyCount++ % 10u) == 0u) {
-                Debug_Printf("%lu,tmc,notready\r\n", (unsigned long)Debug_TimestampMs());
-            }
+            vactual  = TMC2209_GetVActual(drv);
+            irun_akt = TMC2209_GetIrun(drv);
+            (void)TMC2209_ReadStallGuard(drv, &sg_result);   /* bleibt 0 bei Fehl-Read */
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));   /* 10 Hz */
+        int32_t step_cnt = MotorControl_GetPositionMicrosteps();
+
+        Debug_Printf("%lu,%ld,%u,%ld,%u,%u\r\n",
+                     (unsigned long)Debug_TimestampMs(),
+                     (long)vactual, g_enc_raw, (long)step_cnt,
+                     sg_result, irun_akt);
+
+        vTaskDelay(pdMS_TO_TICKS(1));   /* 1 kHz */
     }
 }
 
