@@ -32,6 +32,7 @@ static volatile bool     s_cruising = false; 	// true: Reisegeschwindigkeit erre
 static volatile bool     s_decel    = false; 	// true: Bremsphase
 static volatile bool     s_moveActive = false;
 static volatile bool     s_pulseHigh  = false;	// Toggle-Zustand: hoch/runter
+static volatile bool     s_driverReady = false;	// true erst NACH erfolgreichem TMC2209_Init()
 
 // Task, der gerade auf WaitIdle() wartet --> wird bei jedem Move-Aufruf neu gesetzt
 static volatile TaskHandle_t s_waitingTask = NULL;
@@ -68,7 +69,29 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
     TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
     TMC2209_SetCurrent(&s_drv, 16, 8);      // run/hold -- per CS-Rechner anpassen
 
+    /* StallGuard/CoolStep-Fenster oeffnen, sonst ist SG_RESULT ausserhalb des
+     * TCOOLTHRS-Fensters bedeutungslos (siehe Kommentar in tmc2209.h).
+     * TCOOLTHRS=6000 -> aktiv fuer TSTEP >= 6000, d.h. bis grob ~2000 Vollschritte/s
+     * (TSTEP ~ fCLK_intern/steps_per_s, fCLK ~12 MHz) -- deckt den hier verwendeten
+     * Bereich (400 sps Reisegeschwindigkeit) grosszuegig ab.
+     * SGTHRS=10 ist ein konservativer Startwert (loest erst nahe am echten Stall
+     * aus) -- BEIDE Werte experimentell nachjustieren, sobald SG_RESULT-Logging
+     * (siehe EncoderTestTask) reale Werte unter Last zeigt. */
+    TMC2209_SetCoolStepThreshold(&s_drv, 6000);
+    TMC2209_SetStallguardThreshold(&s_drv, 10);
+
     HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);	// Motor jetzt erst aktivieren
+
+    s_driverReady = true;   /* ab hier darf MotorControl_GetDriver() den Handle rausgeben */
+}
+
+/* ---------------------------------------------------------------------------
+ * Zugriff auf den Treiber-Handle fuer periodische Diagnose-Reads aus anderen
+ * Tasks (siehe Header-Kommentar). NULL, solange Init noch nicht durch ist.
+ * ------------------------------------------------------------------------- */
+TMC2209 *MotorControl_GetDriver(void)
+{
+    return s_driverReady ? &s_drv : NULL;
 }
 
 /* ---------------------------------------------------------------------------

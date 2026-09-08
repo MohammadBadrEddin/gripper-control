@@ -718,6 +718,46 @@ void EncoderTestTask(void *argument)
                      g_enc_present, g_enc_magnet, g_enc_raw, g_enc_deg,
                      (unsigned long)g_enc_errors);
 
+        /* ---------------------------------------------------------------
+         * TMC2209-UART-Diagnose (StallGuard/DRV_STATUS/TSTEP), 10 Hz.
+         *
+         * Zweck: erzeugt periodischen, VORHERSEHBAREN Request/Reply-Verkehr
+         * auf PD5 (USART2), damit der Logic Analyzer dort etwas zu sehen
+         * bekommt -- bisher lief nach dem einmaligen Boot-Handshake in
+         * MotorControl_Init() (GCONF-Readback) gar kein UART-Traffic mehr,
+         * darum "receiven wir nichts": es wurde schlicht nichts mehr
+         * angefragt. Jede Zeile hier meldet zusaetzlich per ok_*-Flag, ob
+         * die Antwort beim STM32 als gueltig (Sync+Adresse+CRC) ankam --
+         * damit laesst sich am Logic Analyzer (elektrisch: kommen Bytes
+         * zurueck?) direkt gegen TeraTerm (Software: wurden sie geparst?)
+         * gegenpruefen, statt raten zu muessen ob es ein Verdrahtungs-
+         * oder ein Firmware-Problem ist.
+         * ------------------------------------------------------------- */
+        TMC2209 *drv = MotorControl_GetDriver();
+        if (drv != NULL) {
+            uint16_t sg_result = 0;
+            uint32_t tstep = 0;
+            TMC2209_Status st = {0};
+
+            bool ok_sg  = TMC2209_ReadStallGuard(drv, &sg_result);
+            bool ok_ts  = TMC2209_ReadTStep(drv, &tstep);
+            bool ok_st  = TMC2209_ReadStatus(drv, &st);
+
+            Debug_Printf("%lu,tmc,%d,%u,%d,%lu,%d,%u,%u,%u,%u\r\n",
+                         (unsigned long)Debug_TimestampMs(),
+                         ok_sg, sg_result,
+                         ok_ts, (unsigned long)tstep,
+                         ok_st, st.cs_actual, st.otpw, st.ot, st.stealth);
+        } else {
+            /* Treiber noch nicht initialisiert (MotorControl_Init laeuft
+             * noch in seiner Retry-Schleife) -- einmal pro Sekunde vermerken,
+             * statt die Logzeilen mit "drv=NULL" zuzuspammen. */
+            static uint32_t s_notReadyCount = 0;
+            if ((s_notReadyCount++ % 10u) == 0u) {
+                Debug_Printf("%lu,tmc,notready\r\n", (unsigned long)Debug_TimestampMs());
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(100));   /* 10 Hz */
     }
 }

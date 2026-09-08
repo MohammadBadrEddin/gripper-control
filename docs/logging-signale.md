@@ -170,6 +170,30 @@ Debug_Printf("%lu,enc,%u,%u,%u,%.2f,%lu\r\n",
 Für den Regler-Task nach demselben Muster erweitern (siehe Signalliste oben), z. B. als
 CSV-Header einmalig beim Boot und danach eine Zeile pro Regelzyklus.
 
+### TMC2209-UART-Diagnose (`tmc`-Zeilen), ebenfalls in `EncoderTestTask()`, 10 Hz
+
+Fragt periodisch `SG_RESULT`, `TSTEP` und `DRV_STATUS` über USART2 (PD5) ab und loggt
+Erfolg/Wert jedes einzelnen Reads:
+
+```c
+Debug_Printf("%lu,tmc,%d,%u,%d,%lu,%d,%u,%u,%u,%u\r\n",
+             (unsigned long)Debug_TimestampMs(),
+             ok_sg, sg_result, ok_ts, (unsigned long)tstep,
+             ok_st, st.cs_actual, st.otpw, st.ot, st.stealth);
+```
+
+Spalten: `t_ms, ok_sg, sg_result, ok_tstep, tstep, ok_status, cs_actual, otpw, ot, stealth`.
+`ok_*` ist `0`, sobald ein Read timeoutet oder die CRC nicht passt — direkt gegen eine
+gleichzeitige Logic-Analyzer-Aufnahme auf PD5 gegenprüfbar: kommen dort Antwort-Bytes an,
+aber `ok_*` bleibt `0`, ist es ein Firmware-Parsing-Problem (CRC/Timing); kommt elektrisch
+gar nichts zurück, ist es Verdrahtung/Pull-up. Zugriff auf den TMC2209-Handle über
+`MotorControl_GetDriver()` (liefert `NULL`, solange `MotorControl_Init()` noch nicht
+durchgelaufen ist).
+
+`SGTHRS`/`TCOOLTHRS` werden in `MotorControl_Init()` (`motor_control.c`) mit
+konservativen Startwerten gesetzt (SGTHRS=10, TCOOLTHRS=6000) — experimentell
+nachjustieren, sobald reale `sg_result`-Werte unter Last vorliegen.
+
 ---
 
 ## 5. Referenz

@@ -26,6 +26,15 @@
 void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart);
 void MotorControlTask(void *argument);
 
+/* Zugriff auf den intern gehaltenen TMC2209-Treiber-Handle, fuer periodische
+ * Diagnose-Reads (StallGuard/DRV_STATUS/TSTEP) aus einem ANDEREN Task heraus
+ * (z.B. EncoderTestTask), ohne den Treiberzustand hier zu duplizieren. Reads
+ * ueber diesen Handle sind Thread-safe (drv->mutex in tmc2209.c serialisiert
+ * sie gegen die Reads/Writes, die MotorControl_Init intern macht). Liefert
+ * NULL, solange MotorControl_Init noch nicht erfolgreich durchgelaufen ist --
+ * IMMER auf NULL pruefen, bevor der Pointer an TMC2209_Read*() übergeben wird. */
+TMC2209 *MotorControl_GetDriver(void);
+
 // Startet eine Bewegung, blockiert NICHT. Gibt false zurück, falls bereits eine Bewegung läuft
 bool MotorControl_Move(int32_t steps, uint32_t max_speed_sps, uint32_t accel_sps2);
 
