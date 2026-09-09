@@ -74,6 +74,16 @@ volatile float    g_enc_deg     = 0.0f; /* last angle in degrees, 0..360      */
 volatile uint32_t g_enc_errors  = 0;    /* cumulative failed reads            */
 volatile uint32_t g_enc_samples = 0;    /* cumulative successful reads        */
 
+/* TMC_DIAG (PE15/EXTI15) -- der Pin war schon als Interrupt scharf (siehe
+ * MX_GPIO_Init), aber es gab bisher KEINEN HAL_GPIO_EXTI_Callback, der
+ * darauf reagiert -- der IRQ lief ins Leere. Zaehler statt Aktion: DIAG
+ * signalisiert je nach GCONF/COOLCONF entweder StallGuard-Schwelle oder
+ * einen Treiberfehler (u.a. Uebertemperatur-Vorwarnung otpw) -- welches von
+ * beidem, steht in DRV_STATUS (per TMC2209_ReadStatus() bereits vorhanden).
+ * Hier nur der Zeitpunkt/die Haeufigkeit; Einordnung passiert beim
+ * Auswerten der sg_result/otpw-Spalten aus derselben Sekunde. */
+volatile uint32_t g_diagEvents = 0;
+
 volatile uint8_t control_UART_Tx_Flag = 0;
 
 /* ---------------------------------------------------------------------------
@@ -562,9 +572,15 @@ void Debug_Init(UART_HandleTypeDef *huart)
   s_debugTxBusy = false;
   s_debugDrops = 0;
 
-  /* Cortex-M7 DWT cycle counter -- free-running, microsecond-resolution
-   * timestamp, no extra timer peripheral needed. */
+  /* Cortex-M7 DWT cycle counter -- free-running, microsecond-resolution.
+   * NICHT mehr fuer t_ms verwendet (siehe Debug_TimestampMs(), Grund dort),
+   * aber jetzt gebraucht fuer dt_us (Laufzeit pro Zyklus, EncoderTestTask):
+   * dafuer reicht die 1ms-Aufloesung des FreeRTOS-Ticks nicht, ein einzelner
+   * Zyklus braucht nur ein paar 100us. DWT->LAR muss auf diesem Cortex-M7
+   * VOR CYCCNTENA entsperrt werden, sonst zaehlt CYCCNT trotz TRCENA nicht
+   * (das war der Grund, warum t_ms vorher immer 0 blieb). */
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->LAR    = 0xC5ACCE55;   /* Cortex-M7 Lock Access Register unlock */
   DWT->CYCCNT = 0;
   DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
 }
@@ -688,57 +704,139 @@ void StartStepperTestTask(void *argument)
 
 
 /**
-  * @brief  1kHz-Telemetrie: t_ms, vactual, enc_raw, step_cnt, sg_result,
-  *         i_run_akt -- alle auf derselben Zeitbasis (FreeRTOS-Tick).
+  * @brief  TMC_DIAG (PE15/EXTI15) Interrupt-Callback.
   *
-  * Ersetzt die fruehere getrennte 10Hz-Encoder-/TMC-Diagnoseausgabe. Format
-  * (eine Zeile pro ms):
+  * Der Pin war schon vor dieser Aenderung als Interrupt scharf (siehe
+  * MX_GPIO_Init/NVIC), aber es gab keinen HAL_GPIO_EXTI_Callback -- der IRQ
+  * lief in den HAL-Weak-Default (macht nichts). Zaehlt hier nur die
+  * Ereignisse; DIAG allein sagt nicht, OB es StallGuard oder ein
+  * Treiberfehler (u.a. Uebertemperatur-Vorwarnung otpw) war -- das steht in
+  * DRV_STATUS, per TMC2209_ReadStatus() bereits vorhanden. Absicht: wer die
+  * Dump-CSV auswertet, sieht an g_diagEvents (im Header mitgeloggt) OB und
+  * WANN in der Aufzeichnung ueberhaupt etwas ausgeloest hat, und kann das
+  * gegen die sg_result-Spalte zur selben Zeit gegenpruefen.
+  */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == TMC_DIAG_Pin) {
+        g_diagEvents++;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ringpuffer-Telemetrie (ersetzt das fruehere Live-Printing).
+ *
+ * Grund fuer die Umstellung: Senden im Reglertakt kostet Zeit IM Task, den
+ * man eigentlich zeitgenau vermessen will -- das verfaelscht die Zeitbasis
+ * mit der Messung selbst. Stattdessen: waehrend des Versuchs in einen
+ * RAM-Puffer schreiben (kein UART-Zugriff im Zeitkritischen Pfad ausser dem
+ * einen SG_RESULT-Read, der fuer die Messung selbst gebraucht wird), danach
+ * einmal am Stueck ueber USART3 raus.
+ *
+ * Trigger fuer "Versuch fertig, jetzt dumpen": hier bewusst einfach gehalten
+ * -- der Puffer fasst TELEMETRY_CAPACITY Samples, ist bei 2ms/Sample nach
+ * TELEMETRY_CAPACITY*2ms voll, dann wird automatisch einmalig gedumpt und
+ * die Aufzeichnung stoppt. Kein Start/Stop-Kommando ueber UART o.ae. -- falls
+ * ihr mehrere/gezielte Versuche aufnehmen wollt (z.B. per Taster oder
+ * UART-Kommando), ist das der Punkt, wo eine echte Trigger-Logik hin muesste;
+ * aktuell laeuft die Aufzeichnung einfach ab dem Boot los.
+ * ------------------------------------------------------------------------- */
+#define TELEMETRY_CAPACITY   5000u   /* bei 2ms/Sample = 10s Aufzeichnung */
+
+typedef struct __attribute__((packed)) {
+    uint32_t t_ms;
+    int32_t  vactual;
+    uint16_t enc_raw;
+    int32_t  step_cnt;
+    uint16_t sg_result;
+    uint8_t  i_run_akt;
+    uint32_t dt_us;       /* Laufzeit DIESES Zyklus (Encoder-Read bis Puffer-Write) */
+} TelemetrySample;
+
+static TelemetrySample s_ringBuf[TELEMETRY_CAPACITY];   /* ~5000*21B =~103KB, passt locker in die 512KB SRAM */
+static uint32_t        s_ringCount = 0;
+
+/* Formatiert+sendet EINE Zeile BLOCKIEREND direkt über USART3, unabhängig
+ * vom Debug_Printf()-Ringpuffer/IT-Mechanismus. Fuer den Dump nach dem
+ * Versuch ist Timing egal, dafuer ist Reihenfolge/Vollstaendigkeit wichtig
+ * -- bei mehreren tausend Zeilen am Stueck wuerde Debug_Printf() aus dem
+ * kleinen 2KB-Ringpuffer (DEBUG_LOG_BUF_SIZE) Zeilen verwerfen (s_debugDrops),
+ * das wollen wir beim Dump nicht. */
+static void DumpLineBlocking(const char *fmt, ...)
+{
+    char line[96];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if ((uint32_t)n >= sizeof(line)) n = sizeof(line) - 1;
+    HAL_UART_Transmit(&huart3, (uint8_t *)line, (uint16_t)n, 100);
+}
+
+/**
+  * @brief  Einmaliger Selbsttest beim ersten Mal, dass der Treiber bereit ist:
+  *         IFCNT (Reg 0x02, zaehlt akzeptierte Schreibzugriffe) vor/nach
+  *         einem echten Write lesen. Steigt IFCNT, kommt die UART2-
+  *         Kommunikation zum TMC2209 tatsaechlich an -- unabhaengig davon,
+  *         ob die Werte im laufenden Log plausibel aussehen.
+  */
+static void TMC_IfcntSelfTest(TMC2209 *drv)
+{
+    uint32_t before = 0, after = 0;
+    bool ok_before = TMC2209_Read(drv, TMC_IFCNT, &before);
+    TMC2209_SetStallguardThreshold(drv, 10);   /* echter Write, Wert unveraendert */
+    bool ok_after  = TMC2209_Read(drv, TMC_IFCNT, &after);
+
+    DumpLineBlocking("# IFCNT-Selbsttest: vorher=%lu(ok=%d) nachher=%lu(ok=%d) delta=%ld -- %s\r\n",
+                      (unsigned long)before, ok_before,
+                      (unsigned long)after, ok_after,
+                      (long)(after - before),
+                      (ok_before && ok_after && after != before) ? "UART2-Kommunikation OK" : "PRUEFEN -- IFCNT stieg nicht");
+}
+
+/**
+  * @brief  Telemetrie-Aufzeichnung + Dump. Ein Sample alle 2ms (500Hz, fest
+  *         aus der Auslegung), in den Ringpuffer, kein Live-Senden.
   *
-  *   t_ms,vactual,enc_raw,step_cnt,sg_result,i_run_akt
+  * CSV-Spalten im Dump: t_ms,vactual,enc_raw,step_cnt,sg_result,i_run_akt,dt_us
   *
-  *   t_ms       uint32_t   FreeRTOS-Tick * portTICK_PERIOD_MS (=1ms/Tick,
-  *                         siehe Debug_TimestampMs()) -- gemeinsame
-  *                         Zeitbasis fuer ALLE Felder dieser Zeile.
-  *   vactual    int32_t    zuletzt tatsaechlich ins VACTUAL-Register
-  *                         geschriebener Wert (Schattenwert, kein Bus-Read
-  *                         noetig) -- in dieser Firmware laeuft die Bewegung
-  *                         ueber STEP/DIR, VACTUAL bleibt daher normal 0.
+  *   t_ms       uint32_t   FreeRTOS-Tick * portTICK_PERIOD_MS -- gemeinsame
+  *                         Zeitbasis fuer ALLE Felder dieser Zeile, exakt im
+  *                         2ms-Raster (siehe Debug_TimestampMs()).
+  *   vactual    int32_t    Schattenwert, VACTUAL bleibt bei STEP/DIR-Betrieb 0.
   *   enc_raw    uint16_t   AS5600 RAW ANGLE, 0..4095, unumgerechnet.
-  *   step_cnt   int32_t    absolute Position seit Boot, in MIKROSCHRITTEN
-  *                         (nicht Vollschritten) -- aus der TIM3-ISR
-  *                         fortgeschrieben, kein Bus-Read noetig.
-  *   sg_result  uint16_t   TMC2209 SG_RESULT (Reg 0x41), 0..510 (10 Bit
-  *                         maskiert) -- der einzige echte Bus-Read pro
-  *                         Zyklus, siehe Baudraten-Kommentar in
-  *                         MX_USART2_UART_Init(). 0, solange der Read
-  *                         fehlschlaegt oder der Treiber noch nicht bereit
-  *                         ist (siehe Timing-Hinweis unten).
-  *   i_run_akt  uint8_t    aktuell gesetzter IRUN-Wert, 0..31 (Schattenwert,
-  *                         kein Bus-Read -- es gibt kein aktives
-  *                         CoolStep-Autoscaling ueber COOLCONF, IRUN aendert
-  *                         sich also nur durch einen expliziten
-  *                         TMC2209_SetCurrent()-Aufruf).
+  *   step_cnt   int32_t    absolute Position seit Boot, in MIKROSCHRITTEN.
+  *   sg_result  uint16_t   TMC2209 SG_RESULT (0x41), einziger echter Bus-Read
+  *                         pro Zyklus (~1,04ms bei 115200 Baud auf UART2 --
+  *                         passt in die 2ms, siehe MX_USART2_UART_Init()).
+  *                         Aktualisiert intern nur je Vollschritt-Aequivalent
+  *                         -- bei 2ms-Abtastung also mehrfach derselbe Wert
+  *                         hintereinander, im Stillstand eingefroren. So
+  *                         gewollt (Team-Absprache 08.09.2026).
+  *   i_run_akt  uint8_t    Schattenwert, aktuell gesetztes IRUN.
+  *   dt_us      uint32_t   Laufzeit dieses Zyklus in us (DWT-Zykluszaehler,
+  *                         NICHT die t_ms-Zeitbasis) -- zum Pruefen, wie viel
+  *                         Reserve im 2ms-Budget noch da ist.
   *
-  * Timing-Budget bei 1kHz (vTaskDelay(1)): I2C-Read AS5600 (~150-200us) +
-  * UART-Read SG_RESULT bei 460800 Baud (~260-400us inkl. HAL-Overhead) +
-  * Formatierung/Ringpuffer (paar us) -- bleibt unter 1ms, aber ohne grosse
-  * Reserve. Falls t_ms in der Aufzeichnung Luecken oder doppelte Werte
-  * zeigt, ist das das Signal fuer einen Task-Overrun (dann Reads entkoppeln
-  * oder Rate senken).
-  *
-  * Die Zeile wird JEDEN Zyklus geschrieben, auch bevor Encoder/Treiber
-  * bereit sind (Werte dann 0) -- damit bleibt das Zeitraster fuer die
-  * spaetere Auswertung durchgehend, statt Luecken beim Start zu haben.
+  * Was NOCH FEHLT und hier bewusst NICHT erraten wurde: x_soll_mm, x_ist_mm,
+  * e_mm, v_cmd_mms, state, sowie KP/KV/v_max/deadband in der Kopfzeile -- es
+  * gibt aktuell keinen Positionsregler im Code, der diese Werte liefert. Das
+  * ist kein Feld, das man einfach dazuschreibt, sondern ein eigener
+  * Regelkreis, der erst spezifiziert werden muss.
   */
 void EncoderTestTask(void *argument)
 {
     (void)argument;
     static AS5600 enc;
+    static bool selfTestDone = false;
 
     /* Let the AS5600 power up before the first transaction. */
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    for (;;) {
+    while (s_ringCount < TELEMETRY_CAPACITY) {
+        uint32_t t0 = Debug_TimestampUs();
+
         if (!g_enc_present) {
             g_enc_present = AS5600_Init(&enc, &hi2c1) ? 1u : 0u;
         }
@@ -762,6 +860,10 @@ void EncoderTestTask(void *argument)
 
         TMC2209 *drv = MotorControl_GetDriver();
         if (drv != NULL) {
+            if (!selfTestDone) {
+                TMC_IfcntSelfTest(drv);
+                selfTestDone = true;
+            }
             vactual  = TMC2209_GetVActual(drv);
             irun_akt = TMC2209_GetIrun(drv);
             (void)TMC2209_ReadStallGuard(drv, &sg_result);   /* bleibt 0 bei Fehl-Read */
@@ -769,13 +871,43 @@ void EncoderTestTask(void *argument)
 
         int32_t step_cnt = MotorControl_GetPositionMicrosteps();
 
-        Debug_Printf("%lu,%ld,%u,%ld,%u,%u\r\n",
-                     (unsigned long)Debug_TimestampMs(),
-                     (long)vactual, g_enc_raw, (long)step_cnt,
-                     sg_result, irun_akt);
+        TelemetrySample *s = &s_ringBuf[s_ringCount++];
+        s->t_ms      = (uint32_t)Debug_TimestampMs();
+        s->vactual   = vactual;
+        s->enc_raw   = g_enc_raw;
+        s->step_cnt  = step_cnt;
+        s->sg_result = sg_result;
+        s->i_run_akt = irun_akt;
+        s->dt_us     = Debug_TimestampUs() - t0;   /* Laufzeit DIESES Zyklus */
 
-        vTaskDelay(pdMS_TO_TICKS(1));   /* 1 kHz */
+        vTaskDelay(pdMS_TO_TICKS(2));   /* 500 Hz, fest aus der Auslegung */
     }
+
+    /* Aufzeichnung voll (10s bei 2ms) -- jetzt am Stueck dumpen. */
+    TMC2209 *drv = MotorControl_GetDriver();
+    DumpLineBlocking("\r\n# --- Versuchsparameter ---\r\n");
+    DumpLineBlocking("# IRUN=%u IHOLD=%u microsteps=1/%u diag_events=%lu\r\n",
+                      drv ? TMC2209_GetIrun(drv) : 0u,
+                      drv ? TMC2209_GetIhold(drv) : 0u,
+                      (unsigned)MOTOR_MICROSTEPS,
+                      (unsigned long)g_diagEvents);
+    DumpLineBlocking("# KP,KV,v_max,deadband: noch nicht implementiert -- kein Positionsregler im Code\r\n");
+    DumpLineBlocking("# -------------------------\r\n");
+    DumpLineBlocking("t_ms,vactual,enc_raw,step_cnt,sg_result,i_run_akt,dt_us\r\n");
+
+    for (uint32_t i = 0; i < s_ringCount; i++) {
+        TelemetrySample *s = &s_ringBuf[i];
+        DumpLineBlocking("%lu,%ld,%u,%ld,%u,%u,%lu\r\n",
+                          (unsigned long)s->t_ms, (long)s->vactual, s->enc_raw,
+                          (long)s->step_cnt, s->sg_result, s->i_run_akt,
+                          (unsigned long)s->dt_us);
+    }
+    DumpLineBlocking("# --- Ende Dump (%lu Samples) ---\r\n", (unsigned long)s_ringCount);
+
+    /* Aufzeichnung ist ein einmaliger Vorgang -- Task ist danach fertig,
+     * blockiert absichtlich fuer immer statt in eine leere Schleife zu
+     * laufen (spart CPU, FreeRTOS schedult einfach weiter um ihn herum). */
+    vTaskSuspend(NULL);
 }
 
 void MotorInitAndTestTask(void *argument)
@@ -784,11 +916,16 @@ void MotorInitAndTestTask(void *argument)
     MotorControl_Init(&htim3, &huart2);
 
     for (;;) {
-        MotorControl_Move(2 * (int32_t)USTEPS_PER_REV, 400, 3000);   // 2 Umdrehungen vor (400 Vollschritte), Reise 400 sps = 2 U/s, accel 3000 sps^2
+        /* Geschwindigkeit/Beschleunigung x16 gegenueber den alten Vollschritt-
+         * Werten (400 sps, 3000 sps^2) -- MOTOR_MICROSTEPS ist jetzt 16, die
+         * Move()-Argumente sind in Schritten BEI DIESER Aufloesung angegeben,
+         * sonst waere die reale Winkelgeschwindigkeit 16x langsamer geworden.
+         * Ergebnis bleibt wie vorher: 2 U/s Reise, 2 Umdrehungen. */
+        MotorControl_Move(2 * (int32_t)USTEPS_PER_REV, 6400, 48000);   // 2 Umdrehungen vor, Reise 6400 sps (=400 Vollschritte/s = 2 U/s), accel 48000 sps^2
         MotorControl_WaitIdle();
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        MotorControl_Move(-2 * (int32_t)USTEPS_PER_REV, 400, 3000);  // 2 Umdrehungen zurück, gleiche Geschwindigkeit
+        MotorControl_Move(-2 * (int32_t)USTEPS_PER_REV, 6400, 48000);  // 2 Umdrehungen zurück, gleiche Geschwindigkeit
         MotorControl_WaitIdle();
         vTaskDelay(pdMS_TO_TICKS(500));
     }

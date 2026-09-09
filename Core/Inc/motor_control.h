@@ -20,8 +20,20 @@
  * abgeleiteten Weg-Konstanten. Move-Distanzen als Vielfache von USTEPS_PER_REV
  * angeben, damit Kommando und tatsächliche Auflösung nie auseinanderlaufen. */
 #define MOTOR_FULLSTEPS_PER_REV   200u                                  /* 1,8°/Schritt */
-#define MOTOR_MICROSTEPS          1u                                    /* Vollschritt -> TMC MRES=8 */
-#define USTEPS_PER_REV            (MOTOR_FULLSTEPS_PER_REV * MOTOR_MICROSTEPS)  /* 200 */
+/* 1/16 Mikroschritt -> TMC MRES=4. War kurzzeitig auf Vollschritt (1) gestellt,
+ * das war ein Denkfehler (siehe Team-Absprache 08.09.2026): bei Vollschritt
+ * ist 1 Schritt = 0,267mm, der Lastwinkel bei 5N liegt aber nur bei 0,056mm
+ * -- damit gar keine Auflösung, um die Soll-Ist-Differenz überhaupt
+ * abzubilden. Mit 1/16 sind es ~0,0167mm/Mikroschritt, genug Reserve.
+ * Wer will, kann hier auf 32/64 hochgehen fuer noch mehr Marge -- einfach
+ * nur diese eine Konstante aendern, der Rest (USTEPS_PER_REV, Positions-
+ * zaehler in motor_control.c, alle MotorControl_Move()-Distanzen) skaliert
+ * automatisch mit. NUR die Geschwindigkeits-/Beschleunigungs-Argumente an
+ * den MotorControl_Move()-Aufrufen sind in "Schritten bei DIESER Auflösung"
+ * angegeben und muessen von Hand mitgezogen werden (in main.c bereits
+ * getan: x16 gegenueber den alten Vollschritt-Werten). */
+#define MOTOR_MICROSTEPS          16u
+#define USTEPS_PER_REV            (MOTOR_FULLSTEPS_PER_REV * MOTOR_MICROSTEPS)  /* 3200 */
 
 void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart);
 void MotorControlTask(void *argument);

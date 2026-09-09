@@ -60,6 +60,7 @@ typedef struct {
      * Platz fuer zusaetzliche Reads, die der Code sowieso schon kennt. */
     volatile int32_t vactual_shadow;   /* zuletzt per MoveVelocity/Stop geschriebener VACTUAL-Wert */
     volatile uint8_t irun_shadow;      /* zuletzt per SetCurrent geschriebener IRUN-Wert, 0..31 */
+    volatile uint8_t ihold_shadow;     /* zuletzt per SetCurrent geschriebener IHOLD-Wert, 0..31 */
 } TMC2209;
 
 /**
@@ -153,5 +154,8 @@ int32_t TMC2209_GetVActual(TMC2209 *drv);
 
 /** Zuletzt per TMC2209_SetCurrent() geschriebener IRUN-Wert, 0..31. */
 uint8_t TMC2209_GetIrun(TMC2209 *drv);
+
+/** Zuletzt per TMC2209_SetCurrent() geschriebener IHOLD-Wert, 0..31. */
+uint8_t TMC2209_GetIhold(TMC2209 *drv);
 
 #endif /* TMC2209_H */

@@ -139,6 +139,7 @@ bool TMC2209_Init(TMC2209 *drv, UART_HandleTypeDef *huart, uint8_t addr)
 
     drv->vactual_shadow = 0;   /* STEP/DIR-Betrieb: VACTUAL bleibt unbenutzt/0 */
     drv->irun_shadow    = 0;   /* wird unten von SetCurrent() ueberschrieben */
+    drv->ihold_shadow   = 0;
 
 //    uint32_t before = 0;
 //    bool have_ifcnt = TMC2209_Read(drv, TMC_IFCNT, &before);
@@ -185,7 +186,8 @@ void TMC2209_SetCurrent(TMC2209 *drv, uint8_t run, uint8_t hold)
                  ((uint32_t)run << 8) |
                  ((uint32_t)6   << 16);			// IHOLDDELAY fixed on 6
     TMC2209_Write(drv, TMC_IHOLD_IRUN, v);
-    drv->irun_shadow = run;   /* fuer 1kHz-Telemetrie, kein Bus-Read noetig */
+    drv->irun_shadow  = run;    /* fuer Telemetrie-Kopfzeile, kein Bus-Read noetig */
+    drv->ihold_shadow = hold;
 }
 
 void TMC2209_SetMicrosteps(TMC2209 *drv, uint16_t usteps)
@@ -237,6 +239,11 @@ int32_t TMC2209_GetVActual(TMC2209 *drv)
 uint8_t TMC2209_GetIrun(TMC2209 *drv)
 {
     return drv->irun_shadow;
+}
+
+uint8_t TMC2209_GetIhold(TMC2209 *drv)
+{
+    return drv->ihold_shadow;
 }
 
 /* ---- StallGuard / CoolStep / diagnostics -------------------------------- */

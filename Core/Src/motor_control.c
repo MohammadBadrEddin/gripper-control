@@ -69,7 +69,7 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
 		vTaskDelay(pdMS_TO_TICKS(500));   /* Retry statt Halt -- per Debugger beobachtbar */
 	}
 
-    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
+    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // muss zu USTEPS_PER_REV passen (siehe motor_control.h)
     TMC2209_SetCurrent(&s_drv, 16, 8);      // run/hold -- per CS-Rechner anpassen
 
     /* StallGuard/CoolStep-Fenster oeffnen, sonst ist SG_RESULT ausserhalb des

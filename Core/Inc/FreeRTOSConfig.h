@@ -52,7 +52,13 @@
   #include <stdint.h>
   extern uint32_t SystemCoreClock;
 #endif
-#define configENABLE_FPU                         0
+/* War 0: mit -mfloat-abi=hard/-mfpu=fpv5-d16 (siehe Debug/Core/Src/subdir.mk)
+ * nutzt der Compiler echte FPU-Instruktionen, aber der Port sicherte die
+ * FPU-Register bei configENABLE_FPU=0 NICHT bei einem Taskwechsel -- jede
+ * Gleitkomma-Rechnung (sqrtf() in der Austin-Rampe, Grad-Umrechnung im
+ * AS5600-Task, Timestamp-Cast) konnte bei Unterbrechung durch einen anderen
+ * Task korrumpiert werden. Echter latenter Bug, kein Nice-to-have. */
+#define configENABLE_FPU                         1
 #define configENABLE_MPU                         0
 
 #define configUSE_PREEMPTION                     1
