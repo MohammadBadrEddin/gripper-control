@@ -27,6 +27,7 @@
 #include "tmc2209.h"
 #include "as5600.h"
 #include "motor_control.h"
+#include "datalog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -84,6 +85,8 @@ static void MX_TIM3_Init(void);
 void EncoderTestTask(void *argument);
 void HeartBeatTask(void *argument);
 void MotorInitAndTestTask(void *argument);
+void LoggerTask(void *argument);
+void DumpButtonTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -132,15 +135,19 @@ int main(void)
    *	motor deactivated:	GPIO_PIN_SET	=> EN disabled (HIGH)! */
   HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_SET);
 
-
+  /* Messdaten-Logger: USART3-VCP (PD8/PD9) + DWT-Zeitbasis + USER-Button PC13.
+   * Startet das Logging sofort (Ringpuffer). Dump spaeter per Button. */
+  Datalog_Init();
 
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_THREADS */
   // xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
   xTaskCreate(MotorInitAndTestTask, "MotorCtrl", 512, NULL, 3, NULL);
-  xTaskCreate(EncoderTestTask,      "Encoder",     512, NULL, 2, NULL);
-  xTaskCreate(HeartBeatTask,        "vHB",         128, NULL, 1, NULL);
+  xTaskCreate(LoggerTask,           "Logger",    512, NULL, 4, NULL);   // 2ms, hoechste Prio -> deterministischer Takt
+  xTaskCreate(DumpButtonTask,       "Dump",      512, NULL, 2, NULL);   // Button PC13 -> CSV-Dump ueber USART3
+  xTaskCreate(HeartBeatTask,        "vHB",       128, NULL, 1, NULL);
+  // xTaskCreate(EncoderTestTask,   "Encoder",   512, NULL, 2, NULL);   // Encoder-Lesung jetzt in LoggerTask
 
   /* Start scheduler */
   vTaskStartScheduler();
@@ -322,7 +329,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = 500000;   /* 500 kBd fuer TMC2209-UART (Auftrag §6); TMC macht Auto-Baud */
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -500,6 +507,76 @@ void MotorInitAndTestTask(void *argument)
         MotorControl_Move(-2 * (int32_t)USTEPS_PER_REV, 400, 3000);  // 2 Umdrehungen zurück, gleiche Geschwindigkeit
         MotorControl_WaitIdle();
         vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+/**
+  * @brief  Messdaten-Logger, fester 2-ms-Takt (vTaskDelayUntil), hoechste Prio.
+  *
+  * Testphase (noch kein Regler): erfasst Zeitstempel (DWT), Encoder-Rohwert,
+  * SG_RESULT (unterabgetastet) und die Mikroschritt-Position in den RAM-Ring-
+  * puffer. Regler-Felder bleiben 0. Auslesen spaeter per Button (USART3-CSV).
+  * Uebernimmt zugleich die AS5600-Lesung (frueher EncoderTestTask).
+  */
+void LoggerTask(void *argument)
+{
+    (void)argument;
+    static AS5600 enc;
+    bool encOk = false;
+
+    /* AS5600 kurz anlernen -- NICHT endlos blockieren: fehlt der Encoder,
+     * loggen wir enc_raw=0xFFFF weiter, damit die Logger-Pipeline testbar ist. */
+    vTaskDelay(pdMS_TO_TICKS(200));
+    for (int i = 0; i < 5 && !encOk; i++) {
+        encOk = AS5600_Init(&enc, &hi2c1);
+        if (!encOk) vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    g_enc_present = encOk ? 1u : 0u;
+
+    uint32_t sgDiv  = 0;         /* SG nur jeden 5. Zyklus (10 ms), Wert wird gehalten */
+    uint16_t sgLast = 0xFFFF;
+
+    TickType_t next = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelayUntil(&next, pdMS_TO_TICKS(2));   /* fester 2-ms-Takt */
+        if (!Datalog_IsActive()) continue;          /* nach dem Dump nichts mehr abtasten */
+
+        LogRecord r = {0};
+        r.t_us = Datalog_TimestampUs();
+
+        r.enc_raw = encOk ? AS5600_ReadRaw(&enc) : 0xFFFF;
+        if (r.enc_raw != 0xFFFF) g_enc_raw = r.enc_raw;
+
+        if (++sgDiv >= 5u) {
+            sgDiv = 0;
+            TMC2209 *drv = MotorControl_GetDriver();
+            uint32_t sg;
+            if (drv && TMC2209_Read(drv, TMC_SG_RESULT, &sg)) sgLast = (uint16_t)(sg & 0x3FFu);
+            else                                              sgLast = 0xFFFF;
+        }
+        r.sg_result = sgLast;
+
+        r.step_cnt  = MotorControl_GetPositionMicrosteps();
+        r.i_run_akt = 16;      /* aktuell fest; spaeter aus der Ablaufsteuerung */
+        r.state     = 0;       /* noch keine FSM */
+        /* x_soll/x_ist/e/v_cmd/vactual bleiben 0 -> noch kein Regler */
+
+        Datalog_Sample(&r);
+    }
+}
+
+/**
+  * @brief  Pollt den USER-Button PC13 (~20 ms) und dumpt bei Druck den
+  *         Ringpuffer als CSV ueber USART3 (blockierend, ~einige Sekunden).
+  */
+void DumpButtonTask(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        if (Datalog_ButtonPressed()) {
+            Datalog_Dump();
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 

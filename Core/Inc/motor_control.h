@@ -35,4 +35,11 @@ void MotorControl_WaitIdle(void);
 // Aus HAL_TIM_PeriodElapsedCallback() fuer TIM3 aufrufen!
 void MotorControl_TimerISR(void);
 
+// TMC2209-Handle fuer Diagnose-Reads (SG_RESULT, DRV_STATUS ...) aus anderen Tasks.
+// Liefert NULL, solange MotorControl_Init() noch nicht durchgelaufen ist. (aus Stand A)
+TMC2209 *MotorControl_GetDriver(void);
+
+// Absolute Position seit Boot in MIKROSCHRITTEN, aus der Schrittzaehlung der ISR. (aus Stand A)
+int32_t MotorControl_GetPositionMicrosteps(void);
+
 #endif /* MOTOR_CONTROL_H_ */

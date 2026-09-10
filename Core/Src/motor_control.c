@@ -32,6 +32,10 @@ static volatile bool     s_cruising = false; 	// true: Reisegeschwindigkeit erre
 static volatile bool     s_decel    = false; 	// true: Bremsphase
 static volatile bool     s_moveActive = false;
 static volatile bool     s_pulseHigh  = false;	// Toggle-Zustand: hoch/runter
+static volatile bool     s_driverReady = false;	// true erst NACH erfolgreichem TMC2209_Init() (aus Stand A)
+
+static volatile int32_t  s_positionFullSteps = 0;	// absolute Position seit Boot, in VOLLSCHRITTEN (aus Stand A)
+static volatile int32_t  s_moveDirSign = 1;			// +1/-1, pro Move() aus dem Vorzeichen von steps gesetzt
 
 // Task, der gerade auf WaitIdle() wartet --> wird bei jedem Move-Aufruf neu gesetzt
 static volatile TaskHandle_t s_waitingTask = NULL;
@@ -65,10 +69,30 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
 		vTaskDelay(pdMS_TO_TICKS(500));   /* Retry statt Halt -- per Debugger beobachtbar */
 	}
 
-    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
+    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // Vollschritt -- muss zu USTEPS_PER_REV passen
     TMC2209_SetCurrent(&s_drv, 16, 8);      // run/hold -- per CS-Rechner anpassen
 
+    /* StallGuard/CoolStep-Fenster oeffnen, sonst ist SG_RESULT ausserhalb des
+     * TCOOLTHRS-Fensters bedeutungslos. Konservative Startwerte -- experimentell
+     * nachjustieren, sobald SG_RESULT-Logging reale Werte unter Last zeigt. (aus Stand A) */
+    TMC2209_SetCoolStepThreshold(&s_drv, 6000);
+    TMC2209_SetStallguardThreshold(&s_drv, 10);
+
     HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);	// Motor jetzt erst aktivieren
+
+    s_driverReady = true;   /* ab hier darf MotorControl_GetDriver() den Handle rausgeben */
+}
+
+/* TMC-Handle fuer Diagnose-Reads; NULL bis Init durch. (aus Stand A) */
+TMC2209 *MotorControl_GetDriver(void)
+{
+    return s_driverReady ? &s_drv : NULL;
+}
+
+/* Absolute Position seit Boot in Mikroschritten. (aus Stand A) */
+int32_t MotorControl_GetPositionMicrosteps(void)
+{
+    return s_positionFullSteps * (int32_t)MOTOR_MICROSTEPS;
 }
 
 /* ---------------------------------------------------------------------------
@@ -82,8 +106,10 @@ bool MotorControl_Move(int32_t steps, uint32_t max_speed_sps, uint32_t accel_sps
 
 	    if (steps > 0) {
 	        HAL_GPIO_WritePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin, GPIO_PIN_SET);
+	        s_moveDirSign = 1;
 	    } else {
 	        HAL_GPIO_WritePin(TMC_DIR_GPIO_Port, TMC_DIR_Pin, GPIO_PIN_RESET);
+	        s_moveDirSign = -1;
 	    }
 	    vTaskDelay(1);   /* DIR->STEP Setup-Zeit */
 
@@ -135,6 +161,7 @@ void MotorControl_TimerISR(void)
 
 	    if (!s_pulseHigh) {
 	        s_stepsRemaining--;
+	        s_positionFullSteps += s_moveDirSign;	// Positions-Tracking fuer Telemetrie (aus Stand A)
 
 	        if (s_stepsRemaining <= 0) {
 	            HAL_TIM_Base_Stop_IT(s_htim);

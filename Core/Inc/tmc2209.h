@@ -36,7 +36,11 @@
 #define TMC_IFCNT       0x02
 #define TMC_IHOLD_IRUN  0x10
 #define TMC_TPOWERDOWN  0x11
+#define TMC_TSTEP       0x12   /* gemessene Zeit zwischen zwei µSteps (read) */
+#define TMC_TCOOLTHRS   0x14   /* untere Geschwindigkeitsschwelle fuer StallGuard/CoolStep */
 #define TMC_VACTUAL     0x22
+#define TMC_SGTHRS      0x40   /* StallGuard4-Schwelle */
+#define TMC_SG_RESULT   0x41   /* StallGuard4-Lastwert 0..1023 (read) */
 #define TMC_CHOPCONF    0x6C
 #define TMC_DRV_STATUS  0x6F
 
@@ -78,5 +82,12 @@ void TMC2209_Stop(TMC2209 *drv);
 
 /** True if UART comms are working (reads IFCNT successfully). */
 bool TMC2209_IsConnected(TMC2209 *drv);
+
+/** StallGuard4-Schwelle SGTHRS (0..255). Hoeher = loest bei geringerer Last aus. */
+void TMC2209_SetStallguardThreshold(TMC2209 *drv, uint8_t sgthrs);
+
+/** StallGuard/CoolStep-Fenster: SG_RESULT ist nur gueltig, solange TSTEP >= TCOOLTHRS
+ *  (d.h. oberhalb einer Mindestgeschwindigkeit). 20-bit-Wert. */
+void TMC2209_SetCoolStepThreshold(TMC2209 *drv, uint32_t tcoolthrs);
 
 #endif /* TMC2209_H */

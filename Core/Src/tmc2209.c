@@ -210,6 +210,16 @@ void TMC2209_SetMicrosteps(TMC2209 *drv, uint16_t usteps)
     TMC2209_Write(drv, TMC_CHOPCONF, chop);
 }
 
+void TMC2209_SetStallguardThreshold(TMC2209 *drv, uint8_t sgthrs)
+{
+    TMC2209_Write(drv, TMC_SGTHRS, (uint32_t)sgthrs);
+}
+
+void TMC2209_SetCoolStepThreshold(TMC2209 *drv, uint32_t tcoolthrs)
+{
+    TMC2209_Write(drv, TMC_TCOOLTHRS, tcoolthrs & 0x000FFFFFu);   /* TCOOLTHRS ist 20-bit */
+}
+
 void TMC2209_MoveVelocity(TMC2209 *drv, int32_t velocity)
 {
     /* VACTUAL is 24-bit signed; mask to 24 bits (two's complement preserved). */
