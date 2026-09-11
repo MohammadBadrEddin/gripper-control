@@ -29,6 +29,8 @@
 #include "motor_control.h"
 #include "datalog.h"
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,7 +47,7 @@
 #define CTRL_KP           125.7f      /* P-Verstaerkung [1/s]                  */
 #define CTRL_VMAX_MMS     40.0f       /* Geschwindigkeits-Saettigung [mm/s]    */
 #define CTRL_AMAX_MMS2    5000.0f     /* Rate-Limiter (ersetzt Rampengen.)     */
-#define CTRL_DEADBAND_MM  0.0261f     /* Dead-Zone (2 Encoderstufen)           */
+#define CTRL_DEADBAND_MM  0.05f       /* Dead-Zone ~4 Counts (gegen Grenzzyklus, mit Median-Filter) */
 #define VACTUAL_PER_MMS   83.77f      /* VACTUAL = 83.77 * v[mm/s] (1/16)      */
 #define MM_PER_REV        53.407f     /* Ritzel Ø17: pi*17 mm/Umdrehung        */
 #define MM_PER_COUNT      (MM_PER_REV / 4096.0f)   /* AS5600: 4096 counts/U    */
@@ -58,6 +60,16 @@
 #define REV_STEPS         20u
 #define REV_STEP_MM       (MM_PER_REV / (float)REV_STEPS)  /* ~2.670 mm/Schritt */
 #define REV_DWELL_CYC     200u        /* Verweildauer je Schritt: 200*2ms = 0.4 s */
+
+/* Positions-Trajektorie waehlen (hier umschalten) */
+#define POS_TRAJ_STAIRCASE 0
+#define POS_TRAJ_SMALLSTEP 1
+#define POS_TRAJ           POS_TRAJ_SMALLSTEP
+
+/* Klein-Sprung-Test: nicht saettigend (e < v_max/Kp = 0.32 mm) -> zeigt die
+ * Kp-/Modelldynamik. Sollwert wechselt 0 <-> SMALLSTEP_MM um eine Referenz. */
+#define SMALLSTEP_MM        0.30f
+#define SMALLSTEP_DWELL_CYC 500u      /* 1 s je Niveau (500*2ms) */
 #define DIR_TEST_MMS      5.0f        /* Open-Loop Richtungs-/Kopplungstest    */
 #define DIR_TEST_CYCLES   100u        /* ~0.2 s                                */
 #define DIR_MIN_COUNTS    20          /* Mindestbewegung, sonst FAULT          */
@@ -67,16 +79,26 @@
 #define CTRL_MODE_EFFORT   1
 #define CTRL_MODE          CTRL_MODE_EFFORT
 
+/* Effort-Submodus: Anschlag-Greifen (Encoder) ODER SG-Kraftregelung */
+#define EFF_MODE_ANSCHLAG 0
+#define EFF_MODE_SGFORCE  1
+#define EFF_MODE          EFF_MODE_SGFORCE
+
 /* ---- Effort-Regler (Auftrag §5, Variante 2) ------------------------------
  * Regelgroesse = Motorlast via SG_RESULT. Fehler e = SG_ist - SG_soll
  * (SG sinkt mit steigender Last). Nur zufahren -> untere Saettigung = 0. */
 #define EFF_KV            0.1f        /* mm/s je SG-count                       */
-#define EFF_SG_SOLL       284         /* Ziel-Lastwert (SG_RESULT)             */
+/* SG_SOLL: KALIBRIEREN am Pruefstand! Modell-Wert 284 gilt fuer SG_0=400; real
+ * liegt SG_0 (frei) hier bei ~35 -> Startwert 20 (= mehr Last). Nach der ersten
+ * Messung aus der SG-ueber-Kraft-Kennlinie fuer die Zielkraft (5 N) setzen. */
+#define EFF_SG_SOLL       27          /* Ziel-Last (SG_RESULT) @EFF_VFEED: ~5 N bei 2 Federn parallel (c=2.12 N/mm). Aus Lauf07/08: ~1 N/count, dF/dSG */
 #define EFF_SG_DEADBAND   3.0f        /* SG-counts, gegen Zittern              */
 #define EFF_VMAX_MMS      20.0f       /* Geschwindigkeits-Saettigung [mm/s]    */
 #define EFF_AMAX_MMS2     200.0f      /* Rate-Limiter [mm/s^2]                 */
 #define EFF_VFEED_MIN     3.0f        /* Mindest-Vorschub -> Motor dreht, SG gueltig */
-#define EFF_VFEED         10.0f       /* konstanter Vorschub in der SG-Charakterisierung */
+#define EFF_VFEED         10.0f       /* konstanter Vorschub (SG bei fester Drehzahl -> sauber) */
+#define EFF_CLOSE_SIGN    (-1)        /* VACTUAL-Vorzeichen zum SCHLIESSEN (Richtung Feder). +VACTUAL fuhr weg -> -1 */
+#define EFF_MAX_TRAVEL_MM 60.0f       /* max. Schließweg ab Regelstart -> sonst FAULT */
 /* Anschlagerkennung ueber Encoder: Netto-Fortschritt je Fenster pruefen
  * (robust gegen ~0.5mm Encoder-Rauschen). */
 #define EFF_CHK_CYC       75u         /* Fensterlaenge: 75*2ms = 0.15s            */
@@ -84,7 +106,7 @@
 #define EFF_STALL_WINS    2u          /* 2 Fenster ohne Fortschritt (0.3s) -> HOLD */
 
 /* Zustaende der Ablaufsteuerung (Logfeld 'state') */
-enum { ST_ZERO = 1, ST_DIRDETECT = 2, ST_CONTROL = 3, ST_HOLD = 4, ST_FAULT = 5 };
+enum { ST_ZERO = 1, ST_DIRDETECT = 2, ST_CONTROL = 3, ST_HOLD = 4, ST_FAULT = 5, ST_OPEN = 6 };
 
 /* USER CODE END PD */
 
@@ -118,6 +140,22 @@ volatile uint32_t g_enc_errors  = 0;    /* cumulative failed reads            */
 volatile uint32_t g_enc_samples = 0;    /* cumulative successful reads        */
 
 volatile uint8_t control_UART_Tx_Flag = 0;
+
+/* --- Live-Schnittstelle (USART3): Telemetrie + Kommandos fuer die MATLAB-App ---
+ * Sollwerte als RAM-Variablen statt compile-time -> live per UART verstellbar.
+ * Kommandos: "f<wert>" Ziel-SG setzen, "g" Ablauf neu starten, "s" anhalten. */
+volatile float    g_eff_sg_soll  = (float)EFF_SG_SOLL;  /* Ziel-Last (SG) im Effort-Modus */
+volatile float    g_pos_x_soll   = 0.0f;   /* Ziel-Position [mm] im Positions-Modus */
+volatile uint8_t  g_ctrl_mode    = CTRL_MODE;  /* 0=Position, 1=Effort (live umschaltbar) */
+volatile uint8_t  g_cmd_stop     = 0;   /* 1 -> Motor anhalten (ST_HOLD)        */
+volatile uint8_t  g_cmd_restart  = 0;   /* 1 -> Ablauf neu starten (ST_ZERO)    */
+volatile uint8_t  g_cmd_open     = 0;   /* 1 -> oeffnen/loesen bis Startposition (ST_OPEN) */
+/* Momentaufnahme fuer die Telemetrie (vom ControlTask je 2-ms-Takt gesetzt). */
+volatile float    g_live_x_ist   = 0.0f;
+volatile float    g_live_x_soll  = 0.0f;
+volatile int32_t  g_live_vactual = 0;
+volatile uint16_t g_live_sg      = 0xFFFF;
+volatile uint8_t  g_live_state   = 0;
 
 /* USER CODE END PV */
 
@@ -194,7 +232,7 @@ int main(void)
   // ControlTask = 2ms Positionsregler (VACTUAL) + Logging in einem Kontext.
   // Ersetzt MotorInitAndTestTask (STEP/DIR-Demo) und LoggerTask.
   xTaskCreate(ControlTask,          "Control",   768, NULL, 4, NULL);   // 2ms, hoechste Prio
-  xTaskCreate(DumpButtonTask,       "Dump",      512, NULL, 2, NULL);   // Button PC13 -> CSV-Dump ueber USART3
+  xTaskCreate(DumpButtonTask,       "Dump",      1024, NULL, 2, NULL);  // Button PC13 -> CSV-Dump ueber USART3
   xTaskCreate(HeartBeatTask,        "vHB",       128, NULL, 1, NULL);
 
   /* Start scheduler */
@@ -542,6 +580,15 @@ void EncoderTestTask(void *argument)
     }
 }
 
+/* Median aus 3 Werten (Spike-Filter fuer den Encoder). */
+static int32_t median3_i32(int32_t a, int32_t b, int32_t c)
+{
+    if (a > b) { int32_t t = a; a = b; b = t; }
+    if (b > c) { int32_t t = b; b = c; c = t; }
+    if (a > b) { int32_t t = a; a = b; b = t; }
+    return b;
+}
+
 /**
   * @brief  Positionsregler (Auftrag §5) + Logging, fester 2-ms-Takt.
   *
@@ -572,24 +619,22 @@ void ControlTask(void *argument)
     }
     g_enc_present = encOk ? 1u : 0u;
 
-    uint8_t  state       = ST_ZERO;
+    uint8_t  state       = ST_HOLD;   /* Boot = Idle: Motor steht, bis die UI START (g) sendet */
     uint16_t enc_prev    = 0;
     bool     have_prev   = false;
     int32_t  total_counts = 0;      /* unwrapped, relativ zum Boot-Nullpunkt   */
+    int32_t  tc0 = 0, tc1 = 0, tc2 = 0;   /* Median-3-Historie fuer total_counts */
     int32_t  enc_dir     = 1;       /* +1/-1, aus DIRDETECT                     */
     uint32_t dir_cnt     = 0;
     float    v_prev      = 0.0f;
     float    step_us_acc = 0.0f;    /* integrierte Mikroschritte (VACTUAL-Pfad) */
     uint16_t sgLast      = 0xFFFF;
     uint32_t sgDiv       = 0;
-#if CTRL_MODE == CTRL_MODE_POSITION
-    uint32_t stepIdx     = 1;       /* aktueller Treppenschritt (1..REV_STEPS)  */
-    uint32_t dwell       = 0;       /* Zaehler fuer die Verweildauer je Schritt */
-#else
+    /* Effort-Zustaende (Laufzeit-Modus -> immer deklariert) */
     float    eff_x_chk   = 0.0f;    /* Encoder-Position am Fensteranfang        */
     uint32_t eff_chk     = 0;       /* Zyklen im aktuellen Fenster              */
     uint32_t eff_stall   = 0;       /* aufeinanderfolgende Fenster ohne Fortschritt */
-#endif
+    float    eff_x0      = 0.0f;    /* Position bei Regelstart (fuer "hat sich bewegt") */
 
     if (drv) TMC2209_MoveVelocity(drv, 0);   /* sicher stehen */
 
@@ -608,7 +653,10 @@ void ControlTask(void *argument)
             total_counts += d;
             enc_prev = raw;
         }
-        float x_ist = (float)enc_dir * (float)total_counts * MM_PER_COUNT;
+        /* Median-3 gegen Encoder-Spikes (Einzel-Ausreisser) */
+        tc2 = tc1; tc1 = tc0; tc0 = total_counts;
+        int32_t tcmed = median3_i32(tc0, tc1, tc2);
+        float x_ist = (float)enc_dir * (float)tcmed * MM_PER_COUNT;
 
         /* --- SG_RESULT fuers Log (unterabgetastet) --- */
         if (++sgDiv >= 5u) {
@@ -621,6 +669,18 @@ void ControlTask(void *argument)
         float   x_soll = 0.0f, e = 0.0f, v = 0.0f;
         int32_t vactual = 0;
 
+        /* --- Live-Kommandos (von DumpButtonTask/USART3 gesetzt) --- */
+        if (g_cmd_stop) {
+            if (drv) TMC2209_MoveVelocity(drv, 0);
+            state = ST_HOLD; g_cmd_stop = 0;
+        }
+        if (g_cmd_restart) {
+            state = ST_ZERO; g_cmd_restart = 0;   /* ST_ZERO nullt Zaehler/Sollwerte */
+        }
+        if (g_cmd_open) {
+            state = ST_OPEN; g_cmd_open = 0;      /* Haltekraft loesen -> zurueck zum Start */
+        }
+
         switch (state) {
         case ST_ZERO:
             total_counts = 0; x_ist = 0.0f;   /* Boot-Position = 0 mm */
@@ -630,9 +690,14 @@ void ControlTask(void *argument)
             break;
 
         case ST_DIRDETECT:
-            /* kleines +VACTUAL, schauen wie der Encoder reagiert */
+            /* kleiner Probe-Vorschub, schauen wie der Encoder reagiert.
+             * Im EFFORT-Modus in SCHLIESSRICHTUNG proben, damit der Greifer
+             * beim Start nicht erst nach aussen (von der Feder weg) faehrt. */
             v = DIR_TEST_MMS;
-            vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+            if (g_ctrl_mode == CTRL_MODE_EFFORT)
+                vactual = EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* Richtung Feder */
+            else
+                vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
             if (drv) TMC2209_MoveVelocity(drv, vactual);
             if (++dir_cnt >= DIR_TEST_CYCLES) {
                 if (drv) TMC2209_MoveVelocity(drv, 0);
@@ -642,47 +707,67 @@ void ControlTask(void *argument)
                 if (state != ST_FAULT) {
                     v_prev = 0.0f;
                     state  = ST_CONTROL;    /* Boot-Nullpunkt bleibt (kein Re-Zero) */
+                    eff_x0    = x_ist;      /* Startposition (Effort: Bewegungs-/Runaway-Check) */
+                    eff_x_chk = x_ist;
+                    eff_chk   = 0;
+                    eff_stall = 0;
                 }
             }
             break;
 
         case ST_CONTROL:
-#if CTRL_MODE == CTRL_MODE_POSITION
-            /* --- Variante 1: Positionsregler auf Treppe --- */
-            x_soll = (float)stepIdx * REV_STEP_MM;       /* Treppe: Schritt stepIdx */
-            e = x_soll - x_ist;                          /* mm */
-            if (fabsf(e) < CTRL_DEADBAND_MM) e = 0.0f;   /* Dead-Zone */
-            v = CTRL_KP * e;                             /* mm/s */
-            if (v >  CTRL_VMAX_MMS) v =  CTRL_VMAX_MMS;  /* Saettigung */
-            if (v < -CTRL_VMAX_MMS) v = -CTRL_VMAX_MMS;
-            {
-                float dv = CTRL_AMAX_MMS2 * CTRL_T_S;    /* Rate-Limiter */
-                if (v > v_prev + dv) v = v_prev + dv;
-                if (v < v_prev - dv) v = v_prev - dv;
-            }
-            v_prev  = v;
-            vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
-            if (drv) TMC2209_MoveVelocity(drv, vactual);
+            if (g_ctrl_mode == CTRL_MODE_EFFORT) {
+                /* --- Variante 2: SG-Kraftregelung (Auftrag §5) ---
+                 * Konstanter Vorschub Richtung Feder, Stop bei SG<=SG_soll (nachdem
+                 * wirklich gefahren) ODER Encoder-Anschlag. e-Feld = SG-Abweichung. */
+                bool sg_val = (sgLast != 0xFFFF && sgLast != 0);
+                bool moved  = (fabsf(x_ist - eff_x0) > 1.0f);
 
-            if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {   /* Runaway */
-                if (drv) TMC2209_MoveVelocity(drv, 0);
-                state = ST_FAULT;
-            } else if (++dwell >= REV_DWELL_CYC) {                /* naechster Treppenschritt */
-                dwell = 0;
-                if (stepIdx < REV_STEPS) stepIdx++;               /* bis 20 (=1 Umdrehung), dann halten */
-            }
-#else
-            /* --- Variante 2: SG-Charakterisierung (Vorstufe zum Effort-Regler) ---
-             * SG_RESULT ist geschwindigkeitsabhaengig und bei ~Stillstand niedrig
-             * -> ein fixer SG-Schwellenstopp greift zu frueh. Daher hier: konstant
-             * zufahren und SG ueber den Weg protokollieren (Kalibrierung). Stop nur
-             * ueber Encoder-Anschlag oder Runaway. e-Feld = SG-SG_SOLL (nur Info). */
-            {
-                e = (sgLast != 0xFFFF) ? ((float)sgLast - (float)EFF_SG_SOLL) : 0.0f;
+                if (sg_val && moved && (float)sgLast <= g_eff_sg_soll) {
+                    if (drv) TMC2209_MoveVelocity(drv, 0);
+                    v = 0.0f; v_prev = 0.0f; vactual = 0;
+                    state = ST_HOLD;
+                    break;
+                }
 
-                v = EFF_VFEED;                               /* konstanter Vorschub */
+                e = sg_val ? ((float)sgLast - g_eff_sg_soll) : 0.0f;
+
+                v = EFF_VFEED;                               /* konstanter Vorschub (sauberes SG) */
                 {
-                    float dv = EFF_AMAX_MMS2 * CTRL_T_S;     /* Rate-Limiter (sanftes Anfahren) */
+                    float dv = EFF_AMAX_MMS2 * CTRL_T_S;      /* Rate-Limiter (sanft anfahren) */
+                    if (v > v_prev + dv) v = v_prev + dv;
+                    if (v < v_prev - dv) v = v_prev - dv;
+                }
+                v_prev  = v;
+                vactual = EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* Richtung Feder */
+                if (drv) TMC2209_MoveVelocity(drv, vactual);
+
+                /* Encoder-Anschlag (harte Last / SG unbrauchbar) -> HOLD */
+                if (++eff_chk >= EFF_CHK_CYC) {
+                    if (fabsf(x_ist - eff_x_chk) < EFF_MIN_PROG) {
+                        if (++eff_stall >= EFF_STALL_WINS) {
+                            if (drv) TMC2209_MoveVelocity(drv, 0);
+                            state = ST_HOLD;
+                        }
+                    } else { eff_stall = 0; }
+                    eff_x_chk = x_ist;
+                    eff_chk   = 0;
+                }
+                if (fabsf(x_ist - eff_x0) > EFF_MAX_TRAVEL_MM) {   /* Runaway */
+                    if (drv) TMC2209_MoveVelocity(drv, 0);
+                    state = ST_FAULT;
+                }
+            } else {
+                /* --- Variante 1: Positionsregler (P + Dead-Zone + Saettigung + Rate-Limiter) ---
+                 * Sollwert live aus g_pos_x_soll (UI). */
+                x_soll = g_pos_x_soll;
+                e = x_soll - x_ist;                          /* mm */
+                if (fabsf(e) < CTRL_DEADBAND_MM) e = 0.0f;   /* Dead-Zone */
+                v = CTRL_KP * e;                             /* mm/s */
+                if (v >  CTRL_VMAX_MMS) v =  CTRL_VMAX_MMS;  /* Saettigung */
+                if (v < -CTRL_VMAX_MMS) v = -CTRL_VMAX_MMS;
+                {
+                    float dv = CTRL_AMAX_MMS2 * CTRL_T_S;    /* Rate-Limiter */
                     if (v > v_prev + dv) v = v_prev + dv;
                     if (v < v_prev - dv) v = v_prev - dv;
                 }
@@ -690,28 +775,31 @@ void ControlTask(void *argument)
                 vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
                 if (drv) TMC2209_MoveVelocity(drv, vactual);
 
-                /* Anschlag ueber Encoder (robust): je Fenster den Netto-Fortschritt
-                 * pruefen. Zu wenig Weg trotz Vorschub -> blockiert -> nach
-                 * EFF_STALL_WINS Fenstern HOLD. */
-                if (++eff_chk >= EFF_CHK_CYC) {
-                    if (fabsf(x_ist - eff_x_chk) < EFF_MIN_PROG) {
-                        if (++eff_stall >= EFF_STALL_WINS) {
-                            if (drv) TMC2209_MoveVelocity(drv, 0);
-                            state = ST_HOLD;
-                        }
-                    } else {
-                        eff_stall = 0;
-                    }
-                    eff_x_chk = x_ist;
-                    eff_chk   = 0;
-                }
-
                 if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {   /* Runaway */
                     if (drv) TMC2209_MoveVelocity(drv, 0);
                     state = ST_FAULT;
                 }
             }
-#endif
+            break;
+
+        case ST_OPEN:                       /* Haltekraft loesen: entgegen Schliessrichtung zum Start */
+            v = EFF_VFEED;
+            {
+                float dv = EFF_AMAX_MMS2 * CTRL_T_S;
+                if (v > v_prev + dv) v = v_prev + dv;
+                if (v < v_prev - dv) v = v_prev - dv;
+            }
+            v_prev  = v;
+            vactual = -EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* Oeffnungsrichtung */
+            if (drv) TMC2209_MoveVelocity(drv, vactual);
+            if (x_ist <= eff_x0 + 0.2f) {                 /* wieder offen (Startposition) */
+                if (drv) TMC2209_MoveVelocity(drv, 0);
+                v = 0.0f; v_prev = 0.0f; vactual = 0;
+                state = ST_HOLD;
+            } else if (fabsf(x_ist - eff_x0) > EFF_MAX_TRAVEL_MM) {   /* Sicherheit */
+                if (drv) TMC2209_MoveVelocity(drv, 0);
+                state = ST_FAULT;
+            }
             break;
 
         case ST_HOLD:                       /* Ziel-Last/Anschlag erreicht -> halten */
@@ -743,6 +831,13 @@ void ControlTask(void *argument)
         r.state     = state;
         r.i_run_akt = 27;
         Datalog_Sample(&r);
+
+        /* --- Live-Snapshot fuer die Telemetrie --- */
+        g_live_x_ist   = x_ist;
+        g_live_x_soll  = x_soll;
+        g_live_vactual = vactual;
+        g_live_sg      = sgLast;
+        g_live_state   = state;
     }
 }
 
@@ -831,10 +926,52 @@ void LoggerTask(void *argument)
 void DumpButtonTask(void *argument)
 {
     (void)argument;
+    static char cmd[32];
+    uint32_t ci = 0;
     for (;;) {
         if (Datalog_ButtonPressed()) {
             Datalog_Dump();
         }
+
+        /* --- Live-Kommandos empfangen (USART3 RX, zeilenweise) --- */
+        int c;
+        while ((c = Datalog_RxByte()) >= 0) {
+            if (c == '\n' || c == '\r') {
+                if (ci > 0) {
+                    cmd[ci] = '\0';
+                    switch (cmd[0]) {
+                        case 'f': case 'F': g_eff_sg_soll = strtof(&cmd[1], NULL); break;
+                        case 'p': case 'P': g_pos_x_soll  = strtof(&cmd[1], NULL); break;
+                        case 'm': case 'M':                              /* Regler umschalten */
+                            g_ctrl_mode = (strtof(&cmd[1], NULL) >= 0.5f) ? CTRL_MODE_EFFORT
+                                                                          : CTRL_MODE_POSITION;
+                            g_cmd_restart = 1;   /* im neuen Modus sauber neu anfahren */
+                            break;
+                        case 'g': case 'G': g_cmd_restart = 1; break;   /* neu starten */
+                        case 's': case 'S': g_cmd_stop    = 1; break;   /* anhalten    */
+                        case 'o': case 'O': g_cmd_open    = 1; break;   /* oeffnen/loesen */
+                        default: break;
+                    }
+                    ci = 0;
+                }
+            } else if (ci < sizeof(cmd) - 1u) {
+                cmd[ci++] = (char)c;
+            }
+        }
+
+        /* --- Telemetrie senden (~50 Hz): ">t_ms,x_ist_um,x_soll_um,sg,vactual,sg_soll_m" --- */
+        {
+            char tl[96];
+            int  xi = (int)lrintf(g_live_x_ist  * 1000.0f);
+            int  xs = (int)lrintf(g_live_x_soll * 1000.0f);
+            int  ss = (int)lrintf(g_eff_sg_soll * 1000.0f);
+            snprintf(tl, sizeof tl, ">%lu,%d,%d,%u,%ld,%d,%u,%u\r\n",
+                     (unsigned long)HAL_GetTick(), xi, xs,
+                     (unsigned)g_live_sg, (long)g_live_vactual, ss,
+                     (unsigned)g_live_state, (unsigned)g_ctrl_mode);
+            Datalog_Tx(tl);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

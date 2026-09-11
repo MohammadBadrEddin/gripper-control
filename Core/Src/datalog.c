@@ -23,6 +23,14 @@ static UART_HandleTypeDef s_huart3;          /* USART3 = ST-Link VCP            
 static uint32_t s_start_us   = 0;            /* Timer-Startwert (us) seit Reset  */
 static uint32_t s_start_tick = 0;            /* HAL-Tick (1 kHz) bei Reset -- Referenz */
 
+/* ---- USART3 RX-Ringpuffer (interruptgesteuert) --------------------------
+ * Kommandos treffen in Mikrosekunden ein; ohne FIFO wuerde Polling im 20-ms-
+ * Takt alle Bytes ausser dem letzten per Overrun verlieren. Daher RXNE-IRQ. */
+#define RX_CAP 128u
+static volatile uint8_t  s_rx[RX_CAP];
+static volatile uint16_t s_rx_head = 0;      /* IRQ schreibt   */
+static volatile uint16_t s_rx_tail = 0;      /* Task liest     */
+
 /* ---- Zeitbasis: freilaufender TIM2 @ 1 MHz (32-bit) ----------------------
  * Robuster als der DWT-Zyklenzaehler (der bei Debug-Halts einfriert). TIM2 ist
  * 32-bit auf dem F7 -> 1 count = 1 us, Ueberlauf erst nach ~71 min. */
@@ -69,8 +77,30 @@ static void usart3_init(void)
     s_huart3.Init.OverSampling           = UART_OVERSAMPLING_16;
     s_huart3.Init.OneBitSampling         = UART_ONE_BIT_SAMPLE_DISABLE;
     s_huart3.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-    if (HAL_UART_Init(&s_huart3) != HAL_OK) {
-        Error_Handler();
+    /* Init-Fehler NICHT ueber Error_Handler behandeln (der schaltet IRQs ab und
+     * haengt ewig -> ganze Firmware tot). Fehlversuch ignorieren; ein spaeterer
+     * Transmit laeuft dann ins endliche Timeout und der Dump bricht sauber ab. */
+    (void)HAL_UART_Init(&s_huart3);
+
+    /* RX per Interrupt (Ringpuffer) -- siehe USART3_IRQHandler unten. */
+    s_rx_head = 0; s_rx_tail = 0;
+    SET_BIT(USART3->CR1, USART_CR1_RXNEIE);
+    HAL_NVIC_SetPriority(USART3_IRQn, 6, 0);   /* >= FreeRTOS-Syscall-Prio; ruft keine API */
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+}
+
+/* RXNE-Interrupt: Byte in den Ringpuffer schieben; Overrun quittieren. */
+void USART3_IRQHandler(void)
+{
+    USART_TypeDef *u = USART3;
+    if (u->ISR & USART_ISR_ORE) {
+        u->ICR = USART_ICR_ORECF;              /* Overrun loeschen, sonst Blockade */
+    }
+    if (u->ISR & USART_ISR_RXNE) {
+        uint8_t b = (uint8_t)(u->RDR & 0xFFu);  /* Lesen loescht RXNE */
+        uint16_t nh = (uint16_t)((s_rx_head + 1u) % RX_CAP);
+        if (nh != s_rx_tail) { s_rx[s_rx_head] = b; s_rx_head = nh; }
+        /* Ring voll -> Byte verwerfen (Kommandos sind kurz, unkritisch) */
     }
 }
 
@@ -141,9 +171,13 @@ static void put_f(char *dst, float v)
     snprintf(dst, 16, "%s%ld.%03ld", sign, (long)(m / 1000), (long)(m % 1000));
 }
 
-static void tx_str(const char *s)
+#define DUMP_TX_TIMEOUT 50u   /* ms je Transfer; bei ~500kBd sind >40x Reserve */
+
+/* true = gesendet. Endliches Timeout -> kein Einfrieren, falls USART3 haengt. */
+static bool tx_str(const char *s)
 {
-    HAL_UART_Transmit(&s_huart3, (uint8_t *)s, (uint16_t)strlen(s), HAL_MAX_DELAY);
+    return HAL_UART_Transmit(&s_huart3, (uint8_t *)s,
+                             (uint16_t)strlen(s), DUMP_TX_TIMEOUT) == HAL_OK;
 }
 
 void Datalog_Dump(void)
@@ -161,12 +195,14 @@ void Datalog_Dump(void)
     uint32_t t_new    = g_log[(start + (n ? n - 1u : 0u)) % LOG_CAPACITY].t_us;
     uint32_t per_dwt  = (n > 1u) ? (t_new - t_old) / (n - 1u) : 0u;
 
-    char hdr[512];
+    /* Puffer STATISCH (nicht auf dem Stack) -> kein Stack-Ueberlauf im Dump-Task.
+     * Datalog_Dump ist nicht reentrant, daher unkritisch. */
+    static char hdr[512];
 
-    tx_str("#BEGIN\r\n");
+    if (!tx_str("#BEGIN\r\n")) return;   /* USART3 haengt -> abbrechen, nicht einfrieren */
     snprintf(hdr, sizeof hdr,
              "# fw=gripper-control mainv1, MCU=STM32F767ZI\r\n"
-             "# IRUN=27, IHOLD=16, microsteps=%u, T_regler_s=0.002, fCLK_MHz=12\r\n"
+             "# IRUN=27, IHOLD=27, microsteps=%u, T_regler_s=0.002, fCLK_MHz=12\r\n"
              "# VREF_V=0.6, VM_V=12.0, R_SENSE_ohm=0.11  (R_SENSE=Annahme, am Modul verifizieren)\r\n"
              "# buffer=%lu, total_samples=%lu, real_elapsed_ms=%lu (HAL-Tick 1kHz)\r\n"
              "# ECHTE Periode = %lu us/Sample | Zeitbasis(TIM2) = %lu us/Sample\r\n"
@@ -175,12 +211,12 @@ void Datalog_Dump(void)
              (unsigned long)real_ms, (unsigned long)per_real, (unsigned long)per_dwt,
              (MotorControl_GetDriver() != 0) ? 1 : 0,
              (unsigned)g_tmc_rx_got, (unsigned long)g_tmc_rx_isr);
-    tx_str(hdr);
-    tx_str("t_us,x_soll_mm,x_ist_mm,e_mm,v_cmd_mms,vactual,enc_raw,step_cnt,sg_result,state,i_run_akt\r\n");
+    if (!tx_str(hdr)) return;
+    if (!tx_str("t_us,x_soll_mm,x_ist_mm,e_mm,v_cmd_mms,vactual,enc_raw,step_cnt,sg_result,state,i_run_akt\r\n")) return;
 
+    static char b1[16], b2[16], b3[16], b4[16], line[192];
     for (uint32_t i = 0; i < n; i++) {
         const LogRecord *r = &g_log[(start + i) % LOG_CAPACITY];
-        char b1[16], b2[16], b3[16], b4[16], line[192];
         put_f(b1, r->x_soll_mm);
         put_f(b2, r->x_ist_mm);
         put_f(b3, r->e_mm);
@@ -192,9 +228,26 @@ void Datalog_Dump(void)
                            (long)r->step_cnt, (unsigned)r->sg_result,
                            (unsigned)r->state, (unsigned)r->i_run_akt);
         if (len > 0) {
-            HAL_UART_Transmit(&s_huart3, (uint8_t *)line, (uint16_t)len, HAL_MAX_DELAY);
+            if (HAL_UART_Transmit(&s_huart3, (uint8_t *)line, (uint16_t)len,
+                                  DUMP_TX_TIMEOUT) != HAL_OK) {
+                return;   /* Sendefehler -> abbrechen statt haengen */
+            }
         }
     }
 
     tx_str("#END\r\n");
+}
+
+/* --- Live-Schnittstelle: gleiche USART3-Instanz, gepollt aus DumpButtonTask --- */
+bool Datalog_Tx(const char *s)
+{
+    return tx_str(s);
+}
+
+int Datalog_RxByte(void)
+{
+    if (s_rx_tail == s_rx_head) return -1;      /* leer */
+    uint8_t b = s_rx[s_rx_tail];
+    s_rx_tail = (uint16_t)((s_rx_tail + 1u) % RX_CAP);
+    return (int)b;
 }

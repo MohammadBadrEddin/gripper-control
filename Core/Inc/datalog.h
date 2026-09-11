@@ -76,4 +76,10 @@ bool Datalog_ButtonPressed(void);
  * ausgeben (blockierend -- nur nach dem Versuch aufrufen). */
 void Datalog_Dump(void);
 
+/* --- Live-Schnittstelle ueber denselben USART3-VCP (fuer die MATLAB-App) --- */
+/* Eine Zeile senden (endliches Timeout, blockiert nicht dauerhaft). true=OK. */
+bool Datalog_Tx(const char *s);
+/* Ein empfangenes Byte abholen; -1 wenn keines da. Overrun wird geloescht. */
+int  Datalog_RxByte(void);
+
 #endif /* DATALOG_H */

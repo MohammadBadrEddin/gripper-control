@@ -70,9 +70,10 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
 	}
 
     TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
-    /* IRUN=27 -> ~0.86 A_RMS (Nennstrom 1.2A, R_SENSE=0.11, vsense=1), IHOLD=16 -> ~0.52 A_RMS.
-     * Mehr Moment als IRUN=16 (0.52 A) und sicher < 1.2 A. */
-    TMC2209_SetCurrent(&s_drv, 27, 16);
+    /* IRUN=27 -> ~0.86 A_RMS (Nennstrom 1.2A, R_SENSE=0.11, vsense=1), sicher < 1.2 A.
+     * IHOLD = IRUN: Effort-Halt gegen Feder braucht volles Haltemoment, sonst
+     * drueckt die Federlast den Motor im HOLD zurueck (IHOLD=16 => zu wenig). */
+    TMC2209_SetCurrent(&s_drv, 27, 27);
 
     /* StallGuard/CoolStep-Fenster oeffnen, sonst ist SG_RESULT ausserhalb des
      * TCOOLTHRS-Fensters bedeutungslos. Konservative Startwerte -- experimentell
