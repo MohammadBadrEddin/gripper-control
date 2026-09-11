@@ -62,8 +62,29 @@
 #define DIR_TEST_CYCLES   100u        /* ~0.2 s                                */
 #define DIR_MIN_COUNTS    20          /* Mindestbewegung, sonst FAULT          */
 
+/* ---- Reglervariante waehlen (hier umschalten) ---------------------------- */
+#define CTRL_MODE_POSITION 0
+#define CTRL_MODE_EFFORT   1
+#define CTRL_MODE          CTRL_MODE_EFFORT
+
+/* ---- Effort-Regler (Auftrag §5, Variante 2) ------------------------------
+ * Regelgroesse = Motorlast via SG_RESULT. Fehler e = SG_ist - SG_soll
+ * (SG sinkt mit steigender Last). Nur zufahren -> untere Saettigung = 0. */
+#define EFF_KV            0.1f        /* mm/s je SG-count                       */
+#define EFF_SG_SOLL       284         /* Ziel-Lastwert (SG_RESULT)             */
+#define EFF_SG_DEADBAND   3.0f        /* SG-counts, gegen Zittern              */
+#define EFF_VMAX_MMS      20.0f       /* Geschwindigkeits-Saettigung [mm/s]    */
+#define EFF_AMAX_MMS2     200.0f      /* Rate-Limiter [mm/s^2]                 */
+#define EFF_VFEED_MIN     3.0f        /* Mindest-Vorschub -> Motor dreht, SG gueltig */
+#define EFF_VFEED         10.0f       /* konstanter Vorschub in der SG-Charakterisierung */
+/* Anschlagerkennung ueber Encoder: Netto-Fortschritt je Fenster pruefen
+ * (robust gegen ~0.5mm Encoder-Rauschen). */
+#define EFF_CHK_CYC       75u         /* Fensterlaenge: 75*2ms = 0.15s            */
+#define EFF_MIN_PROG      1.0f        /* < 1.0mm Netto-Fortschritt/Fenster = blockiert */
+#define EFF_STALL_WINS    2u          /* 2 Fenster ohne Fortschritt (0.3s) -> HOLD */
+
 /* Zustaende der Ablaufsteuerung (Logfeld 'state') */
-enum { ST_ZERO = 1, ST_DIRDETECT = 2, ST_CONTROL = 3, ST_FAULT = 5 };
+enum { ST_ZERO = 1, ST_DIRDETECT = 2, ST_CONTROL = 3, ST_HOLD = 4, ST_FAULT = 5 };
 
 /* USER CODE END PD */
 
@@ -561,8 +582,14 @@ void ControlTask(void *argument)
     float    step_us_acc = 0.0f;    /* integrierte Mikroschritte (VACTUAL-Pfad) */
     uint16_t sgLast      = 0xFFFF;
     uint32_t sgDiv       = 0;
+#if CTRL_MODE == CTRL_MODE_POSITION
     uint32_t stepIdx     = 1;       /* aktueller Treppenschritt (1..REV_STEPS)  */
     uint32_t dwell       = 0;       /* Zaehler fuer die Verweildauer je Schritt */
+#else
+    float    eff_x_chk   = 0.0f;    /* Encoder-Position am Fensteranfang        */
+    uint32_t eff_chk     = 0;       /* Zyklen im aktuellen Fenster              */
+    uint32_t eff_stall   = 0;       /* aufeinanderfolgende Fenster ohne Fortschritt */
+#endif
 
     if (drv) TMC2209_MoveVelocity(drv, 0);   /* sicher stehen */
 
@@ -620,6 +647,8 @@ void ControlTask(void *argument)
             break;
 
         case ST_CONTROL:
+#if CTRL_MODE == CTRL_MODE_POSITION
+            /* --- Variante 1: Positionsregler auf Treppe --- */
             x_soll = (float)stepIdx * REV_STEP_MM;       /* Treppe: Schritt stepIdx */
             e = x_soll - x_ist;                          /* mm */
             if (fabsf(e) < CTRL_DEADBAND_MM) e = 0.0f;   /* Dead-Zone */
@@ -631,17 +660,63 @@ void ControlTask(void *argument)
                 if (v > v_prev + dv) v = v_prev + dv;
                 if (v < v_prev - dv) v = v_prev - dv;
             }
-            v_prev = v;
+            v_prev  = v;
             vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
             if (drv) TMC2209_MoveVelocity(drv, vactual);
 
-            if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {  /* Runaway */
+            if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {   /* Runaway */
                 if (drv) TMC2209_MoveVelocity(drv, 0);
                 state = ST_FAULT;
-            } else if (++dwell >= REV_DWELL_CYC) {       /* naechster Treppenschritt */
+            } else if (++dwell >= REV_DWELL_CYC) {                /* naechster Treppenschritt */
                 dwell = 0;
-                if (stepIdx < REV_STEPS) stepIdx++;      /* bis 20 (=1 Umdrehung), dann halten */
+                if (stepIdx < REV_STEPS) stepIdx++;               /* bis 20 (=1 Umdrehung), dann halten */
             }
+#else
+            /* --- Variante 2: SG-Charakterisierung (Vorstufe zum Effort-Regler) ---
+             * SG_RESULT ist geschwindigkeitsabhaengig und bei ~Stillstand niedrig
+             * -> ein fixer SG-Schwellenstopp greift zu frueh. Daher hier: konstant
+             * zufahren und SG ueber den Weg protokollieren (Kalibrierung). Stop nur
+             * ueber Encoder-Anschlag oder Runaway. e-Feld = SG-SG_SOLL (nur Info). */
+            {
+                e = (sgLast != 0xFFFF) ? ((float)sgLast - (float)EFF_SG_SOLL) : 0.0f;
+
+                v = EFF_VFEED;                               /* konstanter Vorschub */
+                {
+                    float dv = EFF_AMAX_MMS2 * CTRL_T_S;     /* Rate-Limiter (sanftes Anfahren) */
+                    if (v > v_prev + dv) v = v_prev + dv;
+                    if (v < v_prev - dv) v = v_prev - dv;
+                }
+                v_prev  = v;
+                vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+                if (drv) TMC2209_MoveVelocity(drv, vactual);
+
+                /* Anschlag ueber Encoder (robust): je Fenster den Netto-Fortschritt
+                 * pruefen. Zu wenig Weg trotz Vorschub -> blockiert -> nach
+                 * EFF_STALL_WINS Fenstern HOLD. */
+                if (++eff_chk >= EFF_CHK_CYC) {
+                    if (fabsf(x_ist - eff_x_chk) < EFF_MIN_PROG) {
+                        if (++eff_stall >= EFF_STALL_WINS) {
+                            if (drv) TMC2209_MoveVelocity(drv, 0);
+                            state = ST_HOLD;
+                        }
+                    } else {
+                        eff_stall = 0;
+                    }
+                    eff_x_chk = x_ist;
+                    eff_chk   = 0;
+                }
+
+                if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {   /* Runaway */
+                    if (drv) TMC2209_MoveVelocity(drv, 0);
+                    state = ST_FAULT;
+                }
+            }
+#endif
+            break;
+
+        case ST_HOLD:                       /* Ziel-Last/Anschlag erreicht -> halten */
+            v = 0.0f; vactual = 0; v_prev = 0.0f;
+            if (drv) TMC2209_MoveVelocity(drv, 0);
             break;
 
         case ST_FAULT:
@@ -666,7 +741,7 @@ void ControlTask(void *argument)
         r.step_cnt  = (int32_t)lrintf(step_us_acc);
         r.sg_result = sgLast;
         r.state     = state;
-        r.i_run_akt = 16;
+        r.i_run_akt = 27;
         Datalog_Sample(&r);
     }
 }

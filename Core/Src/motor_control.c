@@ -69,13 +69,17 @@ void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart)
 		vTaskDelay(pdMS_TO_TICKS(500));   /* Retry statt Halt -- per Debugger beobachtbar */
 	}
 
-    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // Vollschritt -- muss zu USTEPS_PER_REV passen
-    TMC2209_SetCurrent(&s_drv, 16, 8);      // run/hold -- per CS-Rechner anpassen
+    TMC2209_SetMicrosteps(&s_drv, MOTOR_MICROSTEPS);   // 1/16 -- muss zu USTEPS_PER_REV passen
+    /* IRUN=27 -> ~0.86 A_RMS (Nennstrom 1.2A, R_SENSE=0.11, vsense=1), IHOLD=16 -> ~0.52 A_RMS.
+     * Mehr Moment als IRUN=16 (0.52 A) und sicher < 1.2 A. */
+    TMC2209_SetCurrent(&s_drv, 27, 16);
 
     /* StallGuard/CoolStep-Fenster oeffnen, sonst ist SG_RESULT ausserhalb des
      * TCOOLTHRS-Fensters bedeutungslos. Konservative Startwerte -- experimentell
      * nachjustieren, sobald SG_RESULT-Logging reale Werte unter Last zeigt. (aus Stand A) */
-    TMC2209_SetCoolStepThreshold(&s_drv, 6000);
+    /* TCOOLTHRS hoch -> StallGuard schon ab ~0.7 mm/s gueltig. Mit 6000 war SG
+     * erst > ~33 mm/s gueltig; der Effort-Regler faehrt aber <=20 mm/s. */
+    TMC2209_SetCoolStepThreshold(&s_drv, 300000);
     TMC2209_SetStallguardThreshold(&s_drv, 10);
 
     HAL_GPIO_WritePin(TMC_EN_GPIO_Port, TMC_EN_Pin, GPIO_PIN_RESET);	// Motor jetzt erst aktivieren

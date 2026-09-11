@@ -166,7 +166,7 @@ void Datalog_Dump(void)
     tx_str("#BEGIN\r\n");
     snprintf(hdr, sizeof hdr,
              "# fw=gripper-control mainv1, MCU=STM32F767ZI\r\n"
-             "# IRUN=16, IHOLD=8, microsteps=%u, T_regler_s=0.002, fCLK_MHz=12\r\n"
+             "# IRUN=27, IHOLD=16, microsteps=%u, T_regler_s=0.002, fCLK_MHz=12\r\n"
              "# VREF_V=0.6, VM_V=12.0, R_SENSE_ohm=0.11  (R_SENSE=Annahme, am Modul verifizieren)\r\n"
              "# buffer=%lu, total_samples=%lu, real_elapsed_ms=%lu (HAL-Tick 1kHz)\r\n"
              "# ECHTE Periode = %lu us/Sample | Zeitbasis(TIM2) = %lu us/Sample\r\n"
