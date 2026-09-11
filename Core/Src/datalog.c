@@ -161,17 +161,20 @@ void Datalog_Dump(void)
     uint32_t t_new    = g_log[(start + (n ? n - 1u : 0u)) % LOG_CAPACITY].t_us;
     uint32_t per_dwt  = (n > 1u) ? (t_new - t_old) / (n - 1u) : 0u;
 
-    char hdr[384];
+    char hdr[512];
 
     tx_str("#BEGIN\r\n");
     snprintf(hdr, sizeof hdr,
              "# fw=gripper-control mainv1, MCU=STM32F767ZI\r\n"
              "# IRUN=16, IHOLD=8, microsteps=%u, T_regler_s=0.002, fCLK_MHz=12\r\n"
-             "# VREF_V=?, R_SENSE_ohm=?, VM_V=?  (von Hand eintragen)\r\n"
+             "# VREF_V=0.6, VM_V=12.0, R_SENSE_ohm=0.11  (R_SENSE=Annahme, am Modul verifizieren)\r\n"
              "# buffer=%lu, total_samples=%lu, real_elapsed_ms=%lu (HAL-Tick 1kHz)\r\n"
-             "# ECHTE Periode = %lu us/Sample | Zeitbasis(TIM2) = %lu us/Sample\r\n",
+             "# ECHTE Periode = %lu us/Sample | Zeitbasis(TIM2) = %lu us/Sample\r\n"
+             "# TMC-DIAG: driver_ready=%d, last_read_bytes=%u/8, USART2_ISR=0x%08lX\r\n",
              (unsigned)MOTOR_MICROSTEPS, (unsigned long)n, (unsigned long)total,
-             (unsigned long)real_ms, (unsigned long)per_real, (unsigned long)per_dwt);
+             (unsigned long)real_ms, (unsigned long)per_real, (unsigned long)per_dwt,
+             (MotorControl_GetDriver() != 0) ? 1 : 0,
+             (unsigned)g_tmc_rx_got, (unsigned long)g_tmc_rx_isr);
     tx_str(hdr);
     tx_str("t_us,x_soll_mm,x_ist_mm,e_mm,v_cmd_mms,vactual,enc_raw,step_cnt,sg_result,state,i_run_akt\r\n");
 

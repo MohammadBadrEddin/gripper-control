@@ -83,6 +83,12 @@ void TMC2209_Stop(TMC2209 *drv);
 /** True if UART comms are working (reads IFCNT successfully). */
 bool TMC2209_IsConnected(TMC2209 *drv);
 
+/* Diagnose: Zustand des LETZTEN Register-Reads (fuer Kopfblock/Debugger).
+ * g_tmc_rx_got = wieviele der 8 Antwort-Bytes ankamen (0 = Funkstille),
+ * g_tmc_rx_isr = USART2->ISR danach (Bit1=FE, Bit3=ORE, Bit5=RXNE ...). */
+extern volatile uint8_t  g_tmc_rx_got;
+extern volatile uint32_t g_tmc_rx_isr;
+
 /** StallGuard4-Schwelle SGTHRS (0..255). Hoeher = loest bei geringerer Last aus. */
 void TMC2209_SetStallguardThreshold(TMC2209 *drv, uint8_t sgthrs);
 

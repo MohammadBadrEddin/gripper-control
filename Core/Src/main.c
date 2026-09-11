@@ -28,6 +28,7 @@
 #include "as5600.h"
 #include "motor_control.h"
 #include "datalog.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,6 +38,32 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* ---- Positionsregler (Auftrag §5) ----------------------------------------
+ * Strecke = Integrator -> reiner P-Regler. Aktor = VACTUAL ueber UART. */
+#define CTRL_T_S          0.002f      /* Abtastzeit 2 ms                       */
+#define CTRL_KP           125.7f      /* P-Verstaerkung [1/s]                  */
+#define CTRL_VMAX_MMS     40.0f       /* Geschwindigkeits-Saettigung [mm/s]    */
+#define CTRL_AMAX_MMS2    5000.0f     /* Rate-Limiter (ersetzt Rampengen.)     */
+#define CTRL_DEADBAND_MM  0.0261f     /* Dead-Zone (2 Encoderstufen)           */
+#define VACTUAL_PER_MMS   83.77f      /* VACTUAL = 83.77 * v[mm/s] (1/16)      */
+#define MM_PER_REV        53.407f     /* Ritzel Ø17: pi*17 mm/Umdrehung        */
+#define MM_PER_COUNT      (MM_PER_REV / 4096.0f)   /* AS5600: 4096 counts/U    */
+#define VACTUAL_TO_USTEP  0.71526f    /* usteps/s = 0.71526 * VACTUAL (fCLK 12MHz) */
+
+#define CTRL_XMIN_MM      (-10.0f)    /* Runaway-Grenzen -> FAULT              */
+#define CTRL_XMAX_MM      60.0f       /* > 1 Umdrehung (53.4 mm) + Reserve     */
+
+/* Treppen-Trajektorie: eine volle Umdrehung (53.4 mm) in 20 Schritten */
+#define REV_STEPS         20u
+#define REV_STEP_MM       (MM_PER_REV / (float)REV_STEPS)  /* ~2.670 mm/Schritt */
+#define REV_DWELL_CYC     200u        /* Verweildauer je Schritt: 200*2ms = 0.4 s */
+#define DIR_TEST_MMS      5.0f        /* Open-Loop Richtungs-/Kopplungstest    */
+#define DIR_TEST_CYCLES   100u        /* ~0.2 s                                */
+#define DIR_MIN_COUNTS    20          /* Mindestbewegung, sonst FAULT          */
+
+/* Zustaende der Ablaufsteuerung (Logfeld 'state') */
+enum { ST_ZERO = 1, ST_DIRDETECT = 2, ST_CONTROL = 3, ST_FAULT = 5 };
 
 /* USER CODE END PD */
 
@@ -87,6 +114,7 @@ void HeartBeatTask(void *argument);
 void MotorInitAndTestTask(void *argument);
 void LoggerTask(void *argument);
 void DumpButtonTask(void *argument);
+void ControlTask(void *argument);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -142,12 +170,11 @@ int main(void)
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_THREADS */
-  // xTaskCreate(StartStepperTestTask, "StepperTest", 512, NULL, 3, NULL);
-  xTaskCreate(MotorInitAndTestTask, "MotorCtrl", 512, NULL, 3, NULL);
-  xTaskCreate(LoggerTask,           "Logger",    512, NULL, 4, NULL);   // 2ms, hoechste Prio -> deterministischer Takt
+  // ControlTask = 2ms Positionsregler (VACTUAL) + Logging in einem Kontext.
+  // Ersetzt MotorInitAndTestTask (STEP/DIR-Demo) und LoggerTask.
+  xTaskCreate(ControlTask,          "Control",   768, NULL, 4, NULL);   // 2ms, hoechste Prio
   xTaskCreate(DumpButtonTask,       "Dump",      512, NULL, 2, NULL);   // Button PC13 -> CSV-Dump ueber USART3
   xTaskCreate(HeartBeatTask,        "vHB",       128, NULL, 1, NULL);
-  // xTaskCreate(EncoderTestTask,   "Encoder",   512, NULL, 2, NULL);   // Encoder-Lesung jetzt in LoggerTask
 
   /* Start scheduler */
   vTaskStartScheduler();
@@ -329,7 +356,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 500000;   /* 500 kBd fuer TMC2209-UART (Auftrag §6); TMC macht Auto-Baud */
+  huart2.Init.BaudRate = 115200;   /* DIAGNOSE: temporaer zurueck von 500k, um TMC-Comms zu isolieren (Auftrag will 500k) */
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -494,6 +521,156 @@ void EncoderTestTask(void *argument)
     }
 }
 
+/**
+  * @brief  Positionsregler (Auftrag §5) + Logging, fester 2-ms-Takt.
+  *
+  * Aktor: VACTUAL ueber UART (kein STEP/DIR). Ablauf:
+  *   ST_ZERO      Startposition = 0 mm (Boot-Nullpunkt).
+  *   ST_DIRDETECT kurzer Open-Loop +VACTUAL -> enc_dir bestimmen; keine
+  *                Bewegung erkannt -> FAULT (Motor/Encoder nicht gekoppelt).
+  *   ST_CONTROL   P-Regler auf x_soll, Deadband, Saettigung, Rate-Limiter,
+  *                Runaway-Schutz (x_ist verlaesst [XMIN,XMAX] -> FAULT).
+  *   ST_FAULT     VACTUAL = 0, stehen bleiben.
+  * Alle Logfelder werden pro Zyklus gefuellt.
+  */
+void ControlTask(void *argument)
+{
+    (void)argument;
+
+    /* TMC hochziehen (setzt 1/16, Strom, StallGuard, EN=on). Prio 4 -> der
+     * Init-Read wird von keinem hoeher-prioren Task zerhackt. */
+    MotorControl_Init(&htim3, &huart2);
+    TMC2209 *drv = MotorControl_GetDriver();
+
+    /* Encoder anlernen (nicht endlos). */
+    static AS5600 enc;
+    bool encOk = false;
+    for (int i = 0; i < 10 && !encOk; i++) {
+        encOk = AS5600_Init(&enc, &hi2c1);
+        if (!encOk) vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    g_enc_present = encOk ? 1u : 0u;
+
+    uint8_t  state       = ST_ZERO;
+    uint16_t enc_prev    = 0;
+    bool     have_prev   = false;
+    int32_t  total_counts = 0;      /* unwrapped, relativ zum Boot-Nullpunkt   */
+    int32_t  enc_dir     = 1;       /* +1/-1, aus DIRDETECT                     */
+    uint32_t dir_cnt     = 0;
+    float    v_prev      = 0.0f;
+    float    step_us_acc = 0.0f;    /* integrierte Mikroschritte (VACTUAL-Pfad) */
+    uint16_t sgLast      = 0xFFFF;
+    uint32_t sgDiv       = 0;
+    uint32_t stepIdx     = 1;       /* aktueller Treppenschritt (1..REV_STEPS)  */
+    uint32_t dwell       = 0;       /* Zaehler fuer die Verweildauer je Schritt */
+
+    if (drv) TMC2209_MoveVelocity(drv, 0);   /* sicher stehen */
+
+    TickType_t next = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelayUntil(&next, pdMS_TO_TICKS(2));   /* fester 2-ms-Takt */
+
+        /* --- Encoder lesen + Multiturn-Unwrap --- */
+        uint16_t raw = encOk ? AS5600_ReadRaw(&enc) : 0xFFFF;
+        if (raw != 0xFFFF) {
+            g_enc_raw = raw;
+            if (!have_prev) { enc_prev = raw; have_prev = true; }
+            int32_t d = (int32_t)raw - (int32_t)enc_prev;
+            if (d >  2048) d -= 4096;      /* Unterlauf-Wrap */
+            if (d < -2048) d += 4096;      /* Ueberlauf-Wrap  */
+            total_counts += d;
+            enc_prev = raw;
+        }
+        float x_ist = (float)enc_dir * (float)total_counts * MM_PER_COUNT;
+
+        /* --- SG_RESULT fuers Log (unterabgetastet) --- */
+        if (++sgDiv >= 5u) {
+            sgDiv = 0;
+            uint32_t sg;
+            if (drv && TMC2209_Read(drv, TMC_SG_RESULT, &sg)) sgLast = (uint16_t)(sg & 0x3FFu);
+            else                                              sgLast = 0xFFFF;
+        }
+
+        float   x_soll = 0.0f, e = 0.0f, v = 0.0f;
+        int32_t vactual = 0;
+
+        switch (state) {
+        case ST_ZERO:
+            total_counts = 0; x_ist = 0.0f;   /* Boot-Position = 0 mm */
+            v_prev = 0.0f;
+            dir_cnt = 0;
+            state = ST_DIRDETECT;
+            break;
+
+        case ST_DIRDETECT:
+            /* kleines +VACTUAL, schauen wie der Encoder reagiert */
+            v = DIR_TEST_MMS;
+            vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+            if (drv) TMC2209_MoveVelocity(drv, vactual);
+            if (++dir_cnt >= DIR_TEST_CYCLES) {
+                if (drv) TMC2209_MoveVelocity(drv, 0);
+                if (total_counts >  DIR_MIN_COUNTS)      enc_dir =  1;
+                else if (total_counts < -DIR_MIN_COUNTS) enc_dir = -1;
+                else                                     state   = ST_FAULT; /* keine Bewegung */
+                if (state != ST_FAULT) {
+                    v_prev = 0.0f;
+                    state  = ST_CONTROL;    /* Boot-Nullpunkt bleibt (kein Re-Zero) */
+                }
+            }
+            break;
+
+        case ST_CONTROL:
+            x_soll = (float)stepIdx * REV_STEP_MM;       /* Treppe: Schritt stepIdx */
+            e = x_soll - x_ist;                          /* mm */
+            if (fabsf(e) < CTRL_DEADBAND_MM) e = 0.0f;   /* Dead-Zone */
+            v = CTRL_KP * e;                             /* mm/s */
+            if (v >  CTRL_VMAX_MMS) v =  CTRL_VMAX_MMS;  /* Saettigung */
+            if (v < -CTRL_VMAX_MMS) v = -CTRL_VMAX_MMS;
+            {
+                float dv = CTRL_AMAX_MMS2 * CTRL_T_S;    /* Rate-Limiter */
+                if (v > v_prev + dv) v = v_prev + dv;
+                if (v < v_prev - dv) v = v_prev - dv;
+            }
+            v_prev = v;
+            vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+            if (drv) TMC2209_MoveVelocity(drv, vactual);
+
+            if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {  /* Runaway */
+                if (drv) TMC2209_MoveVelocity(drv, 0);
+                state = ST_FAULT;
+            } else if (++dwell >= REV_DWELL_CYC) {       /* naechster Treppenschritt */
+                dwell = 0;
+                if (stepIdx < REV_STEPS) stepIdx++;      /* bis 20 (=1 Umdrehung), dann halten */
+            }
+            break;
+
+        case ST_FAULT:
+        default:
+            v = 0.0f; vactual = 0; v_prev = 0.0f;
+            if (drv) TMC2209_MoveVelocity(drv, 0);
+            break;
+        }
+
+        /* step_cnt: kommandierte Mikroschritte integrieren (kein STEP-Pin). */
+        step_us_acc += VACTUAL_TO_USTEP * (float)vactual * CTRL_T_S;
+
+        /* --- Log --- */
+        LogRecord r;
+        r.t_us      = Datalog_TimestampUs();
+        r.x_soll_mm = x_soll;
+        r.x_ist_mm  = x_ist;
+        r.e_mm      = e;
+        r.v_cmd_mms = v;
+        r.vactual   = vactual;
+        r.enc_raw   = raw;                     /* 0xFFFF bei Lesefehler */
+        r.step_cnt  = (int32_t)lrintf(step_us_acc);
+        r.sg_result = sgLast;
+        r.state     = state;
+        r.i_run_akt = 16;
+        Datalog_Sample(&r);
+    }
+}
+
 void MotorInitAndTestTask(void *argument)
 {
 //    (void)argument;
@@ -524,9 +701,16 @@ void LoggerTask(void *argument)
     static AS5600 enc;
     bool encOk = false;
 
+    /* Warten, bis MotorControl_Init den TMC hochgezogen hat, BEVOR der 2-ms-Takt
+     * losläuft. Sonst zerhackt die Preemption (Prio 4 > 3) den Half-Duplex-
+     * Init-Read des TMC -> RX-Overrun (F7-USART ohne FIFO) -> Init scheitert.
+     * Max ~5 s; kommt der TMC nicht, wird trotzdem geloggt (Logger-Test). */
+    for (int i = 0; i < 100 && MotorControl_GetDriver() == NULL; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
     /* AS5600 kurz anlernen -- NICHT endlos blockieren: fehlt der Encoder,
      * loggen wir enc_raw=0xFFFF weiter, damit die Logger-Pipeline testbar ist. */
-    vTaskDelay(pdMS_TO_TICKS(200));
     for (int i = 0; i < 5 && !encOk; i++) {
         encOk = AS5600_Init(&enc, &hi2c1);
         if (!encOk) vTaskDelay(pdMS_TO_TICKS(100));

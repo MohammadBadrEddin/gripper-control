@@ -1,9 +1,14 @@
 #include "tmc2209.h"
+#include "task.h"     /* vTaskDelay */
 #include <string.h>
 
 #define TMC_SYNC     0x05
 #define TMC_TIMEOUT  20     /* ms per UART transaction */
 #define TMC_MUTEX_TIMEOUT	pdMS_TO_TICKS(50)	// included for mutex (02.09.2026)
+
+/* Diagnose: Ergebnis des letzten Reads (siehe tmc2209.h) */
+volatile uint8_t  g_tmc_rx_got = 0;
+volatile uint32_t g_tmc_rx_isr = 0;
 
 //volatile uint32_t uart_success = 0;
 
@@ -105,7 +110,11 @@ bool TMC2209_Read(TMC2209 *drv, uint8_t reg, uint32_t *val)
 
 		*/
 
-		if (HAL_UART_Receive(drv->huart, rx, 8, TMC_TIMEOUT) == HAL_OK) {
+		HAL_StatusTypeDef rs = HAL_UART_Receive(drv->huart, rx, 8, TMC_TIMEOUT);
+		/* Diagnose: wieviele Bytes kamen an + USART-Statusregister danach. */
+		g_tmc_rx_got = (uint8_t)(8u - drv->huart->RxXferCount);
+		g_tmc_rx_isr = drv->huart->Instance->ISR;
+		if (rs == HAL_OK) {
 			if (rx[0] == TMC_SYNC && rx[1] == 0xFF && rx[2] == (reg & 0x7F)
 				&& tmc_crc(rx, 7) == rx[7]) {
 				*val = ((uint32_t)rx[3] << 24) | ((uint32_t)rx[4] << 16) |
@@ -131,10 +140,13 @@ bool TMC2209_Init(TMC2209 *drv, UART_HandleTypeDef *huart, uint8_t addr)
     drv->huart = huart;
     drv->addr  = addr;
 
-    // included for mutex (02.09.2026)
-    drv->mutex = xSemaphoreCreateMutex();
+    // Mutex nur EINMAL anlegen -- Init wird in der Retry-Schleife wiederholt
+    // aufgerufen; ein erneutes Create pro Versuch war ein Heap-Leck. (Fix)
     if(drv->mutex == NULL) {
-    	return false;			// heap depleted => check TOTAL_HEAP_SIZE!
+        drv->mutex = xSemaphoreCreateMutex();
+        if(drv->mutex == NULL) {
+            return false;		// heap depleted => check TOTAL_HEAP_SIZE!
+        }
     }
 
 //    uint32_t before = 0;
@@ -162,10 +174,17 @@ bool TMC2209_Init(TMC2209 *drv, UART_HandleTypeDef *huart, uint8_t addr)
     /* Conservative default current: run 16/32, hold 8/32. */
     TMC2209_SetCurrent(drv, 16, 8);
 
-    /* Verify the writes actually landed: IFCNT increments per accepted write. */
+    /* Verify: GCONF zurücklesen. Bei 500 kBd Half-Duplex kann ein einzelner Read
+     * durch Task-Preemption (RX-Overrun, kein FIFO) fehlschlagen -> mehrfach
+     * versuchen, bevor wir aufgeben. (Fix) */
     uint32_t gconf = 0;
-    if (!TMC2209_Read(drv, TMC_GCONF, &gconf)) {
-        return false;		// Chip antwortet nicht --> Hardware-Problem!
+    bool rd_ok = false;
+    for (int i = 0; i < 5 && !rd_ok; i++) {
+        rd_ok = TMC2209_Read(drv, TMC_GCONF, &gconf);
+        if (!rd_ok) vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (!rd_ok) {
+        return false;		// Chip antwortet gar nicht --> dann wirklich Hardware
     }
 
 //    uart_success = 1;

@@ -20,7 +20,7 @@
  * abgeleiteten Weg-Konstanten. Move-Distanzen als Vielfache von USTEPS_PER_REV
  * angeben, damit Kommando und tatsächliche Auflösung nie auseinanderlaufen. */
 #define MOTOR_FULLSTEPS_PER_REV   200u                                  /* 1,8°/Schritt */
-#define MOTOR_MICROSTEPS          1u                                    /* Vollschritt -> TMC MRES=8 */
+#define MOTOR_MICROSTEPS          16u                                   /* 1/16 -> VACTUAL_PER_MMS=83.77 gilt dafuer (VACTUAL-Aktor) */
 #define USTEPS_PER_REV            (MOTOR_FULLSTEPS_PER_REV * MOTOR_MICROSTEPS)  /* 200 */
 
 void MotorControl_Init(TIM_HandleTypeDef *htim, UART_HandleTypeDef *huart);
