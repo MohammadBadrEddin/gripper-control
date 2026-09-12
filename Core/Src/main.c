@@ -691,13 +691,11 @@ void ControlTask(void *argument)
 
         case ST_DIRDETECT:
             /* kleiner Probe-Vorschub, schauen wie der Encoder reagiert.
-             * Im EFFORT-Modus in SCHLIESSRICHTUNG proben, damit der Greifer
-             * beim Start nicht erst nach aussen (von der Feder weg) faehrt. */
+             * IMMER in SCHLIESSRICHTUNG proben (beide Modi): so ist +x_ist ueberall
+             * = Richtung Feder -> positive Zielposition schliesst (intuitiv, und der
+             * Kraft-ueber-Position-Weg x0+dx passt). */
             v = DIR_TEST_MMS;
-            if (g_ctrl_mode == CTRL_MODE_EFFORT)
-                vactual = EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* Richtung Feder */
-            else
-                vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+            vactual = EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* Richtung Feder */
             if (drv) TMC2209_MoveVelocity(drv, vactual);
             if (++dir_cnt >= DIR_TEST_CYCLES) {
                 if (drv) TMC2209_MoveVelocity(drv, 0);
@@ -772,7 +770,7 @@ void ControlTask(void *argument)
                     if (v < v_prev - dv) v = v_prev - dv;
                 }
                 v_prev  = v;
-                vactual = (int32_t)lrintf(VACTUAL_PER_MMS * v);
+                vactual = EFF_CLOSE_SIGN * (int32_t)lrintf(VACTUAL_PER_MMS * v);  /* +x_soll = schliessen */
                 if (drv) TMC2209_MoveVelocity(drv, vactual);
 
                 if (x_ist < CTRL_XMIN_MM || x_ist > CTRL_XMAX_MM) {   /* Runaway */
