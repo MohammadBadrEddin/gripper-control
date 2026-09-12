@@ -642,6 +642,10 @@ void ControlTask(void *argument)
     for (;;) {
         vTaskDelayUntil(&next, pdMS_TO_TICKS(2));   /* fester 2-ms-Takt */
 
+        /* Timestamp SOFORT nach dem Aufwecken nehmen (vor I2C/TMC-Lesen) ->
+         * misst den echten Takt-Jitter, nicht die schwankende Lesedauer. */
+        uint32_t t_cycle = Datalog_TimestampUs();
+
         /* --- Encoder lesen + Multiturn-Unwrap --- */
         uint16_t raw = encOk ? AS5600_ReadRaw(&enc) : 0xFFFF;
         if (raw != 0xFFFF) {
@@ -817,7 +821,7 @@ void ControlTask(void *argument)
 
         /* --- Log --- */
         LogRecord r;
-        r.t_us      = Datalog_TimestampUs();
+        r.t_us      = t_cycle;   /* Aufweck-Zeitpunkt (siehe oben) */
         r.x_soll_mm = x_soll;
         r.x_ist_mm  = x_ist;
         r.e_mm      = e;
